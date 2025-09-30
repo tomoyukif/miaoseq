@@ -266,7 +266,7 @@ primer_list <- system.file("extdata", "amplicon_primers.csv", package = "miaoseq
 
 # Analysis parameters
 n_core <- 30
-size_sel <- c(300, 500)
+size_sel <- c(300, 450)
 check_window <- 10
 
 # Run analysis
