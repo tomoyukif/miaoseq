@@ -78,7 +78,7 @@ in_dir <- "/path/to/pod5/directory"  # MinION outputs raw sequence data files in
 # Reference files
 genome_fn <- '/reference/genome/sequence.fa'  # Reference genome sequence in FASTA format
 pam_list <- system.file("extdata", "agr8_pam_list.csv", package = "miaoseq")  # PAM site information installed with the package
-index_list <- system.file("extdata", "agr8_pam_list.index_listcsv", package = "miaoseq")   # Index sequences for demultiplexing
+index_list <- system.file("extdata", "index_list.csv", package = "miaoseq")   # Index sequences for demultiplexing
 primer_list <- system.file("extdata", "amplicon_primers.csv", package = "miaoseq")  # Primer sequences
 
 # External tool paths
@@ -261,7 +261,7 @@ blast_path <- "/usr/local/bin"
 
 # Reference files
 pam_list <- system.file("extdata", "agr8_pam_list.csv", package = "miaoseq") 
-index_list <- system.file("extdata", "agr8_pam_list.index_listcsv", package = "miaoseq") 
+index_list <- system.file("extdata", "index_list.csv", package = "miaoseq") 
 primer_list <- system.file("extdata", "amplicon_primers.csv", package = "miaoseq")
 
 # Analysis parameters
