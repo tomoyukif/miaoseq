@@ -292,4 +292,4 @@ evalMiao(out_dir = out_dir, output_reads = FALSE)
 
 > **Typical running time and memory usage:**  
 > On a standard workstation using 30 CPU cores, processing the output read data from a single Oxford Nanopore Flongle cell typically takes about **1 hour**. Actual running time may vary depending on hardware, data size, and parameter settings.  
-> **Memory usage:** In a typical run, miaoseq required approximately **20–30 GB of RAM**. Please ensure your system has sufficient memory available for large datasets.
+> **Memory usage:** In a typical run, miaoseq required approximately **15–20 GB of RAM**. Please ensure your system has sufficient memory available for large datasets.
