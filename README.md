@@ -1,6 +1,6 @@
 # miaoseq
 
-**miaoseq** is an R package for analyzing CRISPR-Cas9 editing outcomes from Oxford Nanopore MinION sequencing data. The package provides a comprehensive pipeline for basecalling, demultiplexing, read alignment, and edit-calling analysis.
+**miaoseq** is an R package that provides a comprehensive analysis pipeline for multiplexed indexed amplicon ONT sequencing (MIAOseq), enabling the analysis of CRISPR-Cas9 editing outcomes from Oxford Nanopore MinION data. The package includes tools for basecalling, demultiplexing, read alignment, and edit-calling.
 
 ## Overview
 
