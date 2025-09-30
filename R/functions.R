@@ -1,12 +1,51 @@
-library(Biostrings)
-library(BSgenome)
-library(dplyr)
-library(tidyr)
-library(pwalign)
-
 ################################################################################
 # Prepare indexed amplicon database
 ################################################################################
+#' Prepare amplicon database for read alignment
+#'
+#' This function prepares an amplicon database for read alignment
+#' by extracting amplicon sequences from a reference genome based
+#' on provided primer sequences. It uses BLAST to identify the
+#' locations of the primers in the reference genome and
+#' extracts the corresponding amplicon sequences.
+#'
+#' @param blast_path Path to a directory containing BLAST executables (makeblastdb and blastn).
+#' @param primer_list Path to a CSV file containing primer sequences.
+#' The file should have two columns: primer ID and primer sequence.
+#' Forward primers should have IDs ending with "_F" and reverse primers
+#' with IDs ending with "_R".
+#' @param genome_fn Path to the reference genome sequence in FASTA format.
+#' @param out_dir Output directory where the amplicon database will be created.
+#' @param n_core Number of CPU cores to use for BLAST.
+#'
+#' @export
+#'
+#' @import Biostrings
+#' @import dplyr
+#' @importFrom GenomicRanges GRanges
+#' @importFrom IRanges IRanges
+#' @importFrom BiocGenerics width
+#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom stats setNames
+#' @importFrom utils read.csv write.csv
+#' @importFrom tools file_ext
+#' @importFrom parallel mclapply
+#' @importFrom methods as
+#'
+#' @examples
+#' # blast_path <- "/path/to/blast/bin" # Path to a directory containing blast executables (makeblastdb and blastn)
+#' # primer_list <- "inst/extdata/amplicon_primers.csv"
+#' # genome_fn <- '/reference/genome/sequence.fa' # Reference genome sequence in fasta format
+#' # out_dir <- "/path/to/your/working/directory/output_directory_name"
+#' # n_core <- 30 # Number of CPU cores to use
+#' # amplicon_fn <- prepAmpliconDB(blast_path = blast_path,
+#' #                               primer_list = primer_list,
+#' #                               genome_fn = genome_fn,
+#' #                               out_dir = out_dir,
+#' #                               n_core = n_core)
+#'
+#' @return Path to the generated amplicon FASTA file.
+#'
 prepAmpliconDB <- function(blast_path,
                            primer_list,
                            genome_fn,
@@ -154,6 +193,71 @@ prepAmpliconDB <- function(blast_path,
 ################################################################################
 # Main pipeline wrapper
 ################################################################################
+#' Main pipeline wrapper for MiaoEditcall
+#'
+#' This function serves as the main pipeline wrapper for MiaoEditcall,
+#' orchestrating the steps of basecalling, demultiplexing, read alignment,
+#' and edit-calling. It takes in raw sequencing data and processes it
+#' through each step, producing a summary of edit-calling results.
+#'
+#' @param in_dir Path to the input directory containing raw sequencing data in pod5 format.
+#' @param out_dir Path to the output directory where results will be saved.
+#' @param dorado_path Path to the dorado executable for basecalling.
+#' @param samtools_path Path to the samtools executable for BAM file processing.
+#' @param blast_path Path to a directory containing BLAST executables (makeblastdb and blastn).
+#' @param primer_list Path to a CSV file containing primer sequences.
+#' @param pam_list Path to a CSV file containing PAM site information.
+#' @param index_list Path to a CSV file containing index sequences for demultiplexing.
+#' @param genome_fn Path to the reference genome sequence in FASTA format.
+#' @param amplicon_fn Path to the amplicon database FASTA file.
+#' @param size_sel A numeric vector of length 2 specifying the minimum and maximum read lengths (in bp) to retain for edit-calling.
+#' @param check_window An integer specifying the window size (in bp) around the expected cut site to search for edits.
+#' @param n_core Number of CPU cores to use for parallel processing.
+#' @param resume Logical indicating whether to resume from a previous run if output files already exist.
+#'
+#' @export
+#'
+#' @import Biostrings
+#' @import dplyr
+#' @importFrom BiocGenerics width
+#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom GenomicRanges GRanges
+#' @importFrom IRanges IRanges
+#' @importFrom stats setNames
+#' @importFrom utils read.csv write.csv
+#' @importFrom tools file_ext
+#' @importFrom parallel mclapply
+#' @importFrom methods as
+#'
+#' @examples
+#' # in_dir <- "/path/to/pod5/directory" # MinION outputs raw sequence data files in a pod5 directory
+#' # out_dir <- "/path/to/your/working/directory/output_directory_name"
+#' # genome_fn <- '/reference/genome/sequence.fa' # Reference genome sequence in fasta format
+#' # pam_list <- "inst/extdata/agr8_pam_list.csv"
+#' # index_list <- "inst/extdata/index_list.csv"
+#' # primer_list <- "inst/extdata/amplicon_primers.csv"
+#' # dorado_path <- "/path/to/dorado" # Path to dorado executable
+#' # samtools_path <- "/path/to/samtools" # Path to samtools executable
+#' # blast_path <- "/path/to/blast/bin" # Path to a directory containing blast executables (makeblastdb and blastn)
+#' # n_core <- 30 # Number of CPU cores to use
+#' # amplicon_fn <- "/path/to/your/working/directory/output_directory_name/ref/amplicon.fa"
+#' # editcall_out <- miaoEditcall(in_dir = in_dir,
+#' #                              out_dir = out_dir,
+#' #                              dorado_path = dorado_path,
+#' #                              samtools_path = samtools_path,
+#' #                              blast_path = blast_path,
+#' #                              primer_list = primer_list,
+#' #                              pam_list = pam_list,
+#' #                              index_list = index_list,
+#' #                              genome_fn = genome_fn,
+#' #                              amplicon_fn = amplicon_fn,
+#' #                              size_sel = c(300, 450), # Set the valid range of read length for edit-calling in bp. Adjust based on your amplicon size.
+#' #                              check_window = 10, # Set the window size (in bp) around the expected cut site to search for edits. Adjust based on your experimental design.
+#' #                              n_core = n_core,
+#' #                              resume = FALSE) # Set resume = TRUE to resume from previous run
+#' @return A data frame summarizing the edit-calling results.
+#'
+#'
 miaoEditcall <- function(in_dir,
                          out_dir,
                          dorado_path = "dorado",
@@ -248,6 +352,26 @@ miaoEditcall <- function(in_dir,
 ################################################################################
 # Basecalling
 ################################################################################
+#' Basecalling using Dorado
+#'
+#' This function performs basecalling on raw sequencing data using the Dorado basecaller.
+#' It processes the raw data in a specified input directory, applies quality filtering,
+#' and size selection, and outputs the basecalled reads in FASTA format.
+#' @param in_dir Path to the input directory containing raw sequencing data in pod5 format.
+#' @param basecall_dir Path to the output directory where basecalling results will be saved.
+#' @param size_sel A numeric vector of length 2 specifying the minimum and maximum read lengths (in bp) to retain after size selection.
+#' @param dorado_path Path to the Dorado executable for basecalling.
+#' @param samtools_path Path to the Samtools executable for BAM file processing.
+#' @param n_core Number of CPU cores to use for parallel processing.
+#' @return A character vector containing paths to the size-selected FASTA files of basecalled reads.
+#' @import Biostrings
+#' @importFrom BiocGenerics width
+#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom utils write.table
+#' @importFrom stats setNames
+#' @importFrom methods as
+#' @export
+#'
 doBasecall <- function(in_dir,
                        basecall_dir,
                        size_sel = c(0, Inf),
@@ -304,6 +428,25 @@ doBasecall <- function(in_dir,
 ################################################################################
 # Demultiplexing
 ################################################################################
+#' Demultiplexing using BLAST
+#'
+#' This function performs demultiplexing of basecalled reads using BLAST.
+#' It matches the reads against provided index sequences to assign them to their respective samples.
+#' @param blast_path Path to a directory containing BLAST executables (makeblastdb and blastn).
+#' @param basecall_fn A character vector containing paths to the FASTA files of basecalled reads.
+#' @param demult_dir Path to the output directory where demultiplexing results will be saved.
+#' @param index_list Path to a CSV file containing index sequences for demultiplexing.
+#' The file should have five columns: index ID, forward index ID, forward index sequence, reverse index ID, and reverse index sequence.
+#' @return A data frame summarizing the demultiplexing results.
+#' @import Biostrings
+#' @import dplyr
+#' @importFrom BiocGenerics width
+#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom utils read.csv write.csv
+#' @importFrom stats setNames
+#' @importFrom methods as
+#' @export
+#'
 doDemultiplex <- function(blast_path, basecall_fn, demult_dir, index_list){
     index_df <- read.csv(index_list, header = FALSE)
     f_index <- index_df$V3
@@ -475,6 +618,31 @@ doDemultiplex <- function(blast_path, basecall_fn, demult_dir, index_list){
 ################################################################################
 # align to amplicon
 ################################################################################
+#' Align reads to amplicon sequences using BLAST
+#' This function aligns basecalled reads to a provided amplicon database using BLAST.
+#' It processes the basecalled reads, performs the alignment, and extracts relevant alignment information.
+#' @param blast_path Path to a directory containing BLAST executables (makeblastdb and blastn).
+#' @param basecall_fn A character vector containing paths to the FASTA files of basecalled reads.
+#' @param demult_out A data frame summarizing the demultiplexing results.
+#' @param amplicon_fn Path to the amplicon database FASTA file.
+#' @param align_dir Path to the output directory where alignment results will be saved.
+#' @param primer_list Path to a CSV file containing primer sequences.
+#' @param pam_list Path to a CSV file containing PAM site information.
+#' @param genome_fn Path to the reference genome sequence in FASTA format.
+#' @param check_window An integer specifying the window size (in bp) around the expected cut site to search for edits.
+#' @return A data frame summarizing the alignment results.
+#' @import Biostrings
+#' @import dplyr
+#' @importFrom pwalign pairwiseAlignment aligned
+#' @importFrom BiocGenerics width
+#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom GenomicRanges GRanges
+#' @importFrom IRanges IRanges
+#' @importFrom utils read.csv write.csv
+#' @importFrom stats setNames
+#' @importFrom methods as
+#' @export
+#'
 doAlign <- function(blast_path,
                     basecall_fn,
                     demult_out,
@@ -643,6 +811,22 @@ doAlign <- function(blast_path,
 ################################################################################
 # Evaluate alignments
 ################################################################################
+#' Evaluate alignments and perform edit-calling
+#' This function evaluates the alignments of reads to amplicon sequences and performs edit-calling.
+#' It summarizes the edit-calling results and saves them to output files.
+#' @param demult_out A data frame summarizing the demultiplexing results.
+#' @param align_out A data frame summarizing the alignment results.
+#' @param editcall_dir Path to the output directory where edit-calling results will be saved.
+#' @return A data frame summarizing the edit-calling results.
+#' @import Biostrings
+#' @import dplyr
+#' @importFrom BiocGenerics width
+#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom utils read.csv write.csv
+#' @importFrom stats setNames
+#' @importFrom methods as
+#' @export
+#'
 doEditcall <- function(demult_out, align_out, editcall_dir){
     demult_df <- data.frame(read_name = demult_out$sseqid,
                             i7_index = demult_out$qseqid.f,
@@ -757,6 +941,18 @@ doEditcall <- function(demult_out, align_out, editcall_dir){
 
 ################################################################################
 # Evaluate MIAO results
+################################################################################
+#' @title Evaluate MIAO results
+#' @description This function evaluates the results of the MIAO pipeline and generates a summary report.
+#' @param out_dir The output directory where MIAO results are stored.
+#' @param output_reads Logical. If TRUE, outputs the sequences of non-indexed aligned reads to a FASTA file.
+#' @return A summary report saved in the output directory.
+#'
+#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom dplyr left_join
+#'
+#' @export
+#'
 evalMiao <- function(out_dir, output_reads){
     basecall_dir <- file.path(out_dir, "basecall")
     basecall_tsv <- file.path(basecall_dir, "basecalls_summary.tsv")
