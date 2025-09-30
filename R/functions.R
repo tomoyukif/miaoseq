@@ -25,7 +25,7 @@
 #' @importFrom GenomicRanges GRanges
 #' @importFrom IRanges IRanges
 #' @importFrom BiocGenerics width
-#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom Biostrings readDNAStringSet writeXStringSet DNAStringSet
 #' @importFrom stats setNames
 #' @importFrom utils read.csv write.csv
 #' @importFrom tools file_ext
@@ -220,7 +220,7 @@ prepAmpliconDB <- function(blast_path,
 #' @import Biostrings
 #' @import dplyr
 #' @importFrom BiocGenerics width
-#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom Biostrings readDNAStringSet writeXStringSet DNAStringSet
 #' @importFrom GenomicRanges GRanges
 #' @importFrom IRanges IRanges
 #' @importFrom stats setNames
@@ -275,7 +275,7 @@ miaoEditcall <- function(in_dir,
     basecall_dir <- file.path(out_dir, "basecall")
     dir.create(basecall_dir, recursive = TRUE, showWarnings = FALSE)
     basecall_fn <- file.path(basecall_dir, "basecall.finish")
-    if(resume & file.exists(basecall_fn)){
+    if(resume && file.exists(basecall_fn)){
         message("Basecalling has already completed")
         basecall_fn <- list.files(path = basecall_dir,
                                   pattern = "basecall_filt_sizeselected_reads_.+.fa$",
@@ -293,7 +293,7 @@ miaoEditcall <- function(in_dir,
     demult_dir <- file.path(out_dir, "demultiplex")
     dir.create(demult_dir, recursive = TRUE, showWarnings = FALSE)
     demult_fn <- file.path(demult_dir, "demultiplex_list.csv")
-    if(resume & file.exists(demult_fn)){
+    if(resume && file.exists(demult_fn)){
         message("Demultiplexing has already completed")
         demult_out <- read.csv(demult_fn)
 
@@ -307,7 +307,7 @@ miaoEditcall <- function(in_dir,
     align_dir <- file.path(out_dir, "align")
     dir.create(align_dir, recursive = TRUE, showWarnings = FALSE)
     align_fn <- file.path(align_dir, "alignment_list.csv")
-    if(resume & file.exists(align_fn)){
+    if(resume && file.exists(align_fn)){
         message("Alignment has already completed")
         align_out <- read.csv(align_fn)
 
@@ -326,7 +326,7 @@ miaoEditcall <- function(in_dir,
     editcall_dir <- file.path(out_dir, "editcall")
     dir.create(editcall_dir, recursive = TRUE, showWarnings = FALSE)
     editcall_fn <- file.path(editcall_dir, "editcall_summary.csv")
-    if(resume & file.exists(editcall_fn)){
+    if(resume && file.exists(editcall_fn)){
         message("Editcalling has already completed")
         editcall_out <- read.csv(editcall_fn)
 
@@ -366,7 +366,7 @@ miaoEditcall <- function(in_dir,
 #' @return A character vector containing paths to the size-selected FASTA files of basecalled reads.
 #' @import Biostrings
 #' @importFrom BiocGenerics width
-#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom Biostrings readDNAStringSet writeXStringSet DNAStringSet
 #' @importFrom utils write.table
 #' @importFrom stats setNames
 #' @importFrom methods as
@@ -441,7 +441,7 @@ doBasecall <- function(in_dir,
 #' @import Biostrings
 #' @import dplyr
 #' @importFrom BiocGenerics width
-#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom Biostrings readDNAStringSet writeXStringSet DNAStringSet
 #' @importFrom utils read.csv write.csv
 #' @importFrom stats setNames
 #' @importFrom methods as
@@ -635,7 +635,7 @@ doDemultiplex <- function(blast_path, basecall_fn, demult_dir, index_list){
 #' @import dplyr
 #' @importFrom pwalign pairwiseAlignment aligned
 #' @importFrom BiocGenerics width
-#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom Biostrings readDNAStringSet writeXStringSet DNAStringSet
 #' @importFrom GenomicRanges GRanges
 #' @importFrom IRanges IRanges
 #' @importFrom utils read.csv write.csv
@@ -821,7 +821,7 @@ doAlign <- function(blast_path,
 #' @import Biostrings
 #' @import dplyr
 #' @importFrom BiocGenerics width
-#' @importFrom Biostrings readDNAStringSet writeXStringSet
+#' @importFrom Biostrings readDNAStringSet writeXStringSet DNAStringSet
 #' @importFrom utils read.csv write.csv
 #' @importFrom stats setNames
 #' @importFrom methods as
@@ -948,8 +948,8 @@ doEditcall <- function(demult_out, align_out, editcall_dir){
 #' @param output_reads Logical. If TRUE, outputs the sequences of non-indexed aligned reads to a FASTA file.
 #' @return A summary report saved in the output directory.
 #'
-#' @importFrom Biostrings readDNAStringSet writeXStringSet
-#' @importFrom dplyr left_join
+#' @importFrom Biostrings readDNAStringSet writeXStringSet DNAStringSet
+#' @importFrom dplyr left_join full_join
 #'
 #' @export
 #'
@@ -1006,7 +1006,9 @@ evalMiao <- function(out_dir, output_reads){
     editcall_fn <- file.path(editcall_dir, "editcall_filtered.csv")
     editcall_out <- read.csv(file = editcall_fn)
     n_edicall_reads <- sum(editcall_out$count)
-    n_edicall_reads_per_gene <- tapply(editcall_out$count, editcall_out$target_gene, sum)
+    n_edicall_reads_per_gene <- tapply(editcall_out$count, 
+                                       editcall_out$target_gene, 
+                                       sum)
     prop_edicall_reads_per_gene <- n_edicall_reads_per_gene / n_align_reads_per_gene
 
     non_indexed_aligned_reads <- undemult_out$sseqid[undemult_out$qstart.f > 15 & undemult_out$qstart.r > 15]
