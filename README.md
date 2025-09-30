@@ -19,44 +19,19 @@ The miaoseq pipeline processes raw MinION sequencing data (pod5 format) through 
 miaoseq requires three external tools that must be installed separately from R:
 
 #### 1. Dorado (Oxford Nanopore Technologies)
-Dorado is used for basecalling raw MinION data.
-
-**Installation:**
-```bash
-# Download Dorado from Oxford Nanopore Technologies
-# Visit: https://github.com/nanoporetech/dorado
-
-# Example installation (adjust version as needed):
-wget https://github.com/nanoporetech/dorado/releases/download/v0.5.4/dorado-0.5.4-linux-x64.tar.gz
-tar -xzf dorado-0.5.4-linux-x64.tar.gz
-export PATH=$PATH:/path/to/dorado-0.5.4-linux-x64/bin
-```
+Dorado is used for basecalling raw MinION data.  
+For installation instructions, please visit:  
+https://github.com/nanoporetech/dorado
 
 #### 2. BLAST (NCBI)
-BLAST is used for sequence alignment and demultiplexing.
-
-**Installation:**
-```bash
-# Download BLAST+ from NCBI
-# Visit: https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE_TYPE=BlastDocs&DOC_TYPE=Download
-
-# Example installation:
-wget https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/ncbi-blast-2.14.1+-x64-linux.tar.gz
-tar -xzf ncbi-blast-2.14.1+-x64-linux.tar.gz
-export PATH=$PATH:/path/to/ncbi-blast-2.14.1+/bin
-```
+BLAST is used for sequence alignment and demultiplexing.  
+For installation instructions, please visit:  
+https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE_TYPE=BlastDocs&DOC_TYPE=Download
 
 #### 3. Samtools
-Samtools is used for BAM file processing.
-
-**Installation:**
-```bash
-# Using conda (recommended):
-conda install -c bioconda samtools
-
-# Or download from source:
-# Visit: https://github.com/samtools/samtools
-```
+Samtools is used for BAM file processing.  
+For installation instructions, please visit:  
+https://github.com/samtools/samtools
 
 ### R Package Dependencies
 
@@ -67,17 +42,16 @@ miaoseq requires several R packages that will be installed automatically:
 - **GenomicRanges**: For genomic interval operations
 - **IRanges**: For interval operations
 - **BiocGenerics**: For generic functions
+- **pwalign**: For pairwise sequence alignment
+
 
 ## Installation
 
 ### Install miaoseq
 
 ```r
-# Install from source (if you have the package files)
-install.packages("path/to/miaoseq", repos = NULL, type = "source")
-
-# Or if using devtools:
-devtools::install("path/to/miaoseq")
+# Install miaoseq from GitHub using devtools:
+devtools::install_github("tomoyukif/miaoseq")
 ```
 
 ### Load the package
@@ -213,7 +187,7 @@ CSV file with two columns:
 
 #### Index List (`index_list`)
 CSV file with five columns:
-- Column 1: Index ID
+- Column 1: Index pair ID
 - Column 2: Forward index ID
 - Column 3: Forward index sequence
 - Column 4: Reverse index ID
@@ -223,7 +197,7 @@ CSV file with five columns:
 CSV file with three columns:
 - Column 1: Target gene name
 - Column 2: Chromosome number
-- Column 3: Cut site position
+- Column 3: PAM position
 
 ## Output Files
 
@@ -270,13 +244,15 @@ Here's a complete example workflow:
 
 ```r
 # Load package
-source("R/functions.R")
+library("miaoseq")
 
 # Set up paths
 working_dir <- "/home/user/analysis"
 out_dir <- file.path(working_dir, "miaoseq_results")
-in_dir <- "/data/minion_run/pod5_files"
-genome_fn <- "/reference/human_genome.fa"
+# The 'in_dir' variable should point to the directory containing your MinION raw data in pod5 format.
+# Typically, after a MinION run, pod5 files are located in a subdirectory named 'pod5'.
+in_dir <- "/data/minion_run/pod5"
+genome_fn <- "/reference/genome.fa"
 
 # External tool paths
 dorado_path <- "/usr/local/bin/dorado"
@@ -284,9 +260,9 @@ samtools_path <- "/usr/local/bin/samtools"
 blast_path <- "/usr/local/bin"
 
 # Analysis parameters
-n_core <- 20
+n_core <- 30
 size_sel <- c(300, 500)
-check_window <- 15
+check_window <- 10
 
 # Run analysis
 amplicon_fn <- prepAmpliconDB(blast_path = blast_path,
@@ -314,4 +290,6 @@ editcall_out <- miaoEditcall(in_dir = in_dir,
 evalMiao(out_dir = out_dir, output_reads = FALSE)
 ```
 
-This comprehensive guide should help users understand and effectively use the miaoseq package for their CRISPR-Cas9 editing analysis.
+> **Typical running time and memory usage:**  
+> On a standard workstation using 30 CPU cores, processing the output read data from a single Oxford Nanopore Flongle cell typically takes about **1 hour**. Actual running time may vary depending on hardware, data size, and parameter settings.  
+> **Memory usage:** In a typical run, miaoseq required approximately **20–30 GB of RAM**. Please ensure your system has sufficient memory available for large datasets.
