@@ -1,0 +1,6 @@
+# Makevars file for miaoseq package
+# This file ensures proper C++ compilation with Rcpp
+
+PKG_CXXFLAGS = -std=c++11
+PKG_LIBS = 
+CXX_STD = CXX11
