@@ -310,7 +310,9 @@ miaoEditcall <- function(in_dir,
     if(resume && file.exists(align_fn)){
         message("Alignment has already completed")
         align_out <- read.csv(align_fn)
-
+        intact_seq <- read.csv(file.path(align_dir, "intact_seq.csv"))
+        attributes(align_out) <- c(attributes(align_out), list(intact_seq = intact_seq))
+        
     } else {
         align_out <- doAlign(blast_path = blast_path,
                              basecall_fn = basecall_fn,
@@ -804,6 +806,7 @@ doAlign <- function(blast_path,
 
     align_fn <- file.path(align_dir, "alignment_list.csv")
     write.csv(align_out, align_fn, row.names = FALSE)
+    write.csv(intact_seq, file.path(align_dir, "intact_seq.csv"), row.names = FALSE)
     attributes(align_out) <- c(attributes(align_out), list(intact_seq = intact_seq))
     return(align_out)
 }
@@ -856,7 +859,8 @@ doEditcall <- function(demult_out, align_out, editcall_dir){
     })
     edit_df <- do.call("rbind", edit_df)
     write.csv(edit_df, file.path(editcall_dir, "editcall_all.csv"), row.names = FALSE)
-
+    
+    edit_df <- subset(edit_df, subset = count > 4)
     edit_df_filtered <- tapply(seq_len(nrow(edit_df)), edit_df$index_pair_id, function(i){
         i_df <- edit_df[i, ]
         i_out <- tapply(seq_len(nrow(i_df)), i_df$target_gene, function(j){
