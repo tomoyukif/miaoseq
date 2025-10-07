@@ -310,7 +310,7 @@ miaoEditcall <- function(in_dir,
     if(resume && file.exists(align_fn)){
         message("Alignment has already completed")
         align_out <- read.csv(align_fn)
-        intact_seq <- read.csv(file.path(align_dir, "intact_seq.csv"))
+        intact_seq <- readDNAStringSet(file.path(align_dir, "intact_seq.fa"))
         attributes(align_out) <- c(attributes(align_out), list(intact_seq = intact_seq))
         
     } else {
@@ -704,14 +704,14 @@ doAlign <- function(blast_path,
                             ranges = IRanges(start = edit_site$V3 - check_window,
                                              end = edit_site$V3 + check_window),
                             target = edit_site$V1)
-    genome_seq <- genome[edit_site_gr]
-    names(genome_seq) <- edit_site_gr$target
-    genome_seq <- genome_seq[order(names(genome_seq))]
+    intact_seq <- genome[edit_site_gr]
+    names(intact_seq) <- edit_site_gr$target
+    intact_seq <- intact_seq[order(names(intact_seq))]
     amplicon_seq <- amplicon_seq[order(names(amplicon_seq))]
 
     aln <- Map(f = function(x, y){
         pairwiseAlignment(x, y)
-    }, genome_seq, amplicon_seq)
+    }, intact_seq, amplicon_seq)
 
     aln <- lapply(aln, aligned)
     aln <- lapply(aln, as.character)
@@ -794,7 +794,6 @@ doAlign <- function(blast_path,
         align_out <- rbind(align_out, i_out)
     }
 
-    intact_seq <- as.character(genome_seq)
     align_out$intact <- align_out$read_seq %in% intact_seq
 
     full_amplicon <- data.frame(read_name = ampl_hit$sseqid,
@@ -806,7 +805,7 @@ doAlign <- function(blast_path,
 
     align_fn <- file.path(align_dir, "alignment_list.csv")
     write.csv(align_out, align_fn, row.names = FALSE)
-    write.csv(intact_seq, file.path(align_dir, "intact_seq.csv"), row.names = FALSE)
+    writeXStringSet(intact_seq, file.path(align_dir, "intact_seq.fa"))
     attributes(align_out) <- c(attributes(align_out), list(intact_seq = intact_seq))
     return(align_out)
 }
