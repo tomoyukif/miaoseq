@@ -1155,7 +1155,7 @@ editViewer <- function(out_dir, sample_list){
     edit_result$uniq[dup_list$dup] <- "Uniq"
 
     long_edit_result <- tidyr::pivot_longer(edit_result,
-                                            cols = -c(index_pair_id, name:col),
+                                            cols = -c(index_pair_id, name:uniq),
                                             names_to = "gene",
                                             values_to = "edit")
 
