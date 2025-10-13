@@ -1090,3 +1090,105 @@ evalMiao <- function(out_dir, output_reads){
     write.table(x = out3, file = file.path(summary_dir, "aligned_reads_per_gene.tsv"),
                 row.names = FALSE, col.names = FALSE, sep = "\t")
 }
+
+################################################################################
+# Edit result visualization
+################################################################################
+#' Visualize edit-calling results per plate as PDF heatmaps
+#'
+#' This function takes the edit-calling summary and produces per-plate PDF
+#' heatmaps summarizing genotype categories per target for each sample well.
+#'
+#' @param edit_result A data.frame produced from edit-calling summarizing
+#'   genotypes per index pair. Must contain columns: `index_pair_id`, `name`,
+#'   `plate`, `well_row`, `well_col`, target gene columns, and `data_type`.
+#'   It should include rows where `data_type == 'genotype'`.
+#' @param out_dir Output directory to save generated PDFs.
+#' @return Invisibly, a character vector of generated PDF file paths.
+#' @export
+editViewer <- function(edit_result, out_dir){
+    if(!dir.exists(out_dir)){
+        dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+    }
+
+    edit_result <- subset(edit_result,
+                          select = -c(data_type, total_read),
+                          subset = data_type == "genotype")
+
+    edit_result_pat <- apply(subset(edit_result,
+                                    select = -c(index_pair_id:name)), 1, paste, collapse = "_")
+    dup_list <- tapply(seq_along(edit_result_pat), sub("_.+", "", edit_result$name), function(i){
+        dup <- !duplicated(edit_result_pat[i])
+        out <- data.frame(i = i, dup = dup)
+        return(out)
+    })
+    dup_list <- do.call("rbind", dup_list)
+    dup_list <- dup_list[order(dup_list$i), ]
+    edit_result$uniq <- "Dup"
+    edit_result$uniq[dup_list$dup] <- "Uniq"
+
+    long_edit_result <- tidyr::pivot_longer(edit_result,
+                                            cols = -c(index_pair_id:name, uniq),
+                                            names_to = "gene",
+                                            values_to = "edit")
+
+    long_edit_result$edit_eval <- sapply(long_edit_result$edit, function(x){
+        x <- unlist(strsplit(x, "/"))
+        if(all(is.na(x))){
+            return(NA)
+        }
+        x1 <- gsub("[0-9]", "", x)
+        x2 <- as.numeric(gsub("[a-zA-Z]", "", x))
+        is_ref <- x1 %in% "ref"
+        is_inframe <- x2 %% 3 %in% 0
+        if(all(is_ref)){
+            return("ref")
+        } else if(all(!is_ref)){
+            if(all(!is_inframe)){
+                return("alt")
+            } else if(all(is_inframe)){
+                return("alt_inframe_homo")
+            } else {
+                return("alt_inframe_het")
+            }
+        } else {
+            if(all(!is_inframe)){
+                return("het")
+            } else {
+                return("het_inframe")
+            }
+        }
+    })
+
+    eval_levels <- c("ref",
+                     "alt", "alt_inframe_het", "alt_inframe_homo",
+                     "het", "het_inframe")
+    long_edit_result$edit_eval <- factor(long_edit_result$edit_eval, eval_levels)
+    long_edit_result <- subset(long_edit_result, name != "")
+    n_name <- length(unique(long_edit_result$name))
+
+    out_files <- character(0)
+    for(i in unique(long_edit_result$plate)){
+        p <- ggplot2::ggplot(subset(long_edit_result, plate == i)) +
+            ggplot2::geom_tile(ggplot2::aes(x = sub("_.+", "", gene), y = 0, fill = edit_eval)) +
+            ggplot2::geom_text(ggplot2::aes(x = (n_name + 1) / 2, y = 1.6, label = name), vjust = 1, hjust = 0.5, size = 3) +
+            ggplot2::geom_text(ggplot2::aes(x = (n_name + 1) / 2, y = 1, label = uniq), vjust = 1, hjust = 0.5, size = 2.5) +
+            ggplot2::facet_grid(rows = ggplot2::vars(well_row), cols = ggplot2::vars(well_col), switch = "y") +
+            ggplot2::scale_fill_manual(values = c("yellow", "darkblue", "blue",
+                                                 "lightblue", "darkgreen", "green"),
+                                       breaks = eval_levels,
+                                       name = NULL) +
+            ggplot2::labs(title = paste0("Plate ", i)) +
+            ggplot2::theme(axis.title = ggplot2::element_blank(),
+                           axis.text.y = ggplot2::element_blank(),
+                           axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, size = 7),
+                           axis.ticks.y = ggplot2::element_blank(),
+                           panel.grid = ggplot2::element_blank())
+        pdf_fn <- file.path(out_dir, paste0("edit_viewer_plate", i, ".pdf"))
+        grDevices::pdf(pdf_fn, width = 11, height = 6)
+        print(p)
+        grDevices::dev.off()
+        out_files <- c(out_files, pdf_fn)
+    }
+    invisible(out_files)
+}
