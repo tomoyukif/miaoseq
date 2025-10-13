@@ -312,7 +312,7 @@ miaoEditcall <- function(in_dir,
         align_out <- read.csv(align_fn)
         intact_seq <- readDNAStringSet(file.path(align_dir, "intact_seq.fa"))
         attributes(align_out) <- c(attributes(align_out), list(intact_seq = intact_seq))
-        
+
     } else {
         align_out <- doAlign(blast_path = blast_path,
                              basecall_fn = basecall_fn,
@@ -858,7 +858,7 @@ doEditcall <- function(demult_out, align_out, editcall_dir){
     })
     edit_df <- do.call("rbind", edit_df)
     write.csv(edit_df, file.path(editcall_dir, "editcall_all.csv"), row.names = FALSE)
-    
+
     edit_df <- subset(edit_df, subset = count > 4)
     edit_df_filtered <- tapply(seq_len(nrow(edit_df)), edit_df$index_pair_id, function(i){
         i_df <- edit_df[i, ]
@@ -1009,8 +1009,8 @@ evalMiao <- function(out_dir, output_reads){
     editcall_fn <- file.path(editcall_dir, "editcall_filtered.csv")
     editcall_out <- read.csv(file = editcall_fn)
     n_edicall_reads <- sum(editcall_out$count)
-    n_edicall_reads_per_gene <- tapply(editcall_out$count, 
-                                       editcall_out$target_gene, 
+    n_edicall_reads_per_gene <- tapply(editcall_out$count,
+                                       editcall_out$target_gene,
                                        sum)
     prop_edicall_reads_per_gene <- n_edicall_reads_per_gene / n_align_reads_per_gene
 
@@ -1099,24 +1099,51 @@ evalMiao <- function(out_dir, output_reads){
 #' This function takes the edit-calling summary and produces per-plate PDF
 #' heatmaps summarizing genotype categories per target for each sample well.
 #'
-#' @param edit_result A data.frame produced from edit-calling summarizing
-#'   genotypes per index pair. Must contain columns: `index_pair_id`, `name`,
-#'   `plate`, `well_row`, `well_col`, target gene columns, and `data_type`.
-#'   It should include rows where `data_type == 'genotype'`.
-#' @param out_dir Output directory to save generated PDFs.
+#' @param out_dir Output directory of a completed run. Must contain
+#'   `editcall/editcall_summary.csv` with the same structure as `edit_result`.
+#'   PDFs will be saved into `file.path(out_dir, "editviewer")`.
+#' @param sample_list Path to a CSV file mapping index pairs to sample and plate
+#'   layout. This file is expected to have NO header and exactly five columns in
+#'   this order:
+#'   1) `index_pair_id`, 2) `sample_name`, 3) `plate_id`, 4) `row_id`,
+#'   5) `col_id`. Example rows:
+#'   
+#'   miaoBC0001,Sample_A,1,A,1
+#'   miaoBC0002,Sample_B,1,A,2
+#'   
+#'   The values are used to annotate plots (sample name) and to facet by plate
+#'   and well coordinates (row, col).
 #' @return Invisibly, a character vector of generated PDF file paths.
 #' @export
-editViewer <- function(edit_result, out_dir){
+editViewer <- function(out_dir, sample_list){
     if(!dir.exists(out_dir)){
-        dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+        stop("out_dir does not exist: ", out_dir)
     }
 
+    plot_dir <- file.path(out_dir, "editviewer")
+    dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+    csv_fn <- file.path(out_dir, "editcall", "editcall_summary.csv")
+    if(!file.exists(csv_fn)){
+        stop("Cannot find editcall summary: ", csv_fn)
+    }
+    edit_result <- read.csv(csv_fn)
+
     edit_result <- subset(edit_result,
-                          select = -c(data_type, total_read),
+                          select = -data_type,
                           subset = data_type == "genotype")
 
+    sample_list <- read.csv(sample_list, header = FALSE)
+    hit <- match(edit_result$index_pair_id, sample_list$V1)
+    edit_result$name <- sample_list$V2[hit]
+    edit_result$plate <- sample_list$V3[hit]
+    edit_result$row <- sample_list$V4[hit]
+    edit_result$col <- sample_list$V5[hit]
     edit_result_pat <- apply(subset(edit_result,
-                                    select = -c(index_pair_id:name)), 1, paste, collapse = "_")
+                                    select = -c(index_pair_id, name:col)),
+                             1,
+                             paste,
+                             collapse = "_")
     dup_list <- tapply(seq_along(edit_result_pat), sub("_.+", "", edit_result$name), function(i){
         dup <- !duplicated(edit_result_pat[i])
         out <- data.frame(i = i, dup = dup)
@@ -1128,7 +1155,7 @@ editViewer <- function(edit_result, out_dir){
     edit_result$uniq[dup_list$dup] <- "Uniq"
 
     long_edit_result <- tidyr::pivot_longer(edit_result,
-                                            cols = -c(index_pair_id:name, uniq),
+                                            cols = -c(index_pair_id, name:col),
                                             names_to = "gene",
                                             values_to = "edit")
 
@@ -1165,17 +1192,17 @@ editViewer <- function(edit_result, out_dir){
                      "het", "het_inframe")
     long_edit_result$edit_eval <- factor(long_edit_result$edit_eval, eval_levels)
     long_edit_result <- subset(long_edit_result, name != "")
-    n_name <- length(unique(long_edit_result$name))
+    n_gene <- length(unique(long_edit_result$gene))
 
     out_files <- character(0)
     for(i in unique(long_edit_result$plate)){
         p <- ggplot2::ggplot(subset(long_edit_result, plate == i)) +
             ggplot2::geom_tile(ggplot2::aes(x = sub("_.+", "", gene), y = 0, fill = edit_eval)) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_name + 1) / 2, y = 1.6, label = name), vjust = 1, hjust = 0.5, size = 3) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_name + 1) / 2, y = 1, label = uniq), vjust = 1, hjust = 0.5, size = 2.5) +
-            ggplot2::facet_grid(rows = ggplot2::vars(well_row), cols = ggplot2::vars(well_col), switch = "y") +
+            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1.6, label = name), vjust = 1, hjust = 0.5, size = 3) +
+            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1, label = uniq), vjust = 1, hjust = 0.5, size = 2.5) +
+            ggplot2::facet_grid(rows = ggplot2::vars(row), cols = ggplot2::vars(col), switch = "y") +
             ggplot2::scale_fill_manual(values = c("yellow", "darkblue", "blue",
-                                                 "lightblue", "darkgreen", "green"),
+                                                  "lightblue", "darkgreen", "green"),
                                        breaks = eval_levels,
                                        name = NULL) +
             ggplot2::labs(title = paste0("Plate ", i)) +
@@ -1184,7 +1211,7 @@ editViewer <- function(edit_result, out_dir){
                            axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, size = 7),
                            axis.ticks.y = ggplot2::element_blank(),
                            panel.grid = ggplot2::element_blank())
-        pdf_fn <- file.path(out_dir, paste0("edit_viewer_plate", i, ".pdf"))
+        pdf_fn <- file.path(plot_dir, paste0("edit_viewer_plate", i, ".pdf"))
         grDevices::pdf(pdf_fn, width = 11, height = 6)
         print(p)
         grDevices::dev.off()
