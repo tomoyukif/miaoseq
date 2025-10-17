@@ -214,6 +214,8 @@ prepAmpliconDB <- function(blast_path,
 #' @param check_window An integer specifying the window size (in bp) around the expected cut site to search for edits.
 #' @param n_core Number of CPU cores to use for parallel processing.
 #' @param resume Logical indicating whether to resume from a previous run if output files already exist.
+#' @param sample_list Optional path to a CSV file mapping index pairs to sample information.
+#'   If provided, adds sample names and total read counts to the summary.
 #'
 #' @export
 #'
@@ -271,7 +273,8 @@ miaoEditcall <- function(in_dir,
                          size_sel,
                          check_window = 10,
                          n_core = 1,
-                         resume = FALSE){
+                         resume = FALSE,
+                         sample_list = NULL){
     basecall_dir <- file.path(out_dir, "basecall")
     dir.create(basecall_dir, recursive = TRUE, showWarnings = FALSE)
     basecall_fn <- file.path(basecall_dir, "basecall.finish")
@@ -335,7 +338,8 @@ miaoEditcall <- function(in_dir,
     } else {
         editcall_out <- doEditcall(demult_out = demult_out,
                                    align_out = align_out,
-                                   editcall_dir = editcall_dir)
+                                   editcall_dir = editcall_dir,
+                                   sample_list = sample_list)
     }
     return(editcall_out)
 }
@@ -819,6 +823,8 @@ doAlign <- function(blast_path,
 #' @param demult_out A data frame summarizing the demultiplexing results.
 #' @param align_out A data frame summarizing the alignment results.
 #' @param editcall_dir Path to the output directory where edit-calling results will be saved.
+#' @param sample_list Optional path to a CSV file mapping index pairs to sample information.
+#'   If provided, adds sample names and total read counts to the summary.
 #' @return A data frame summarizing the edit-calling results.
 #' @import Biostrings
 #' @import dplyr
@@ -829,7 +835,7 @@ doAlign <- function(blast_path,
 #' @importFrom methods as
 #' @export
 #'
-doEditcall <- function(demult_out, align_out, editcall_dir){
+doEditcall <- function(demult_out, align_out, editcall_dir, sample_list = NULL){
     demult_df <- data.frame(read_name = demult_out$sseqid,
                             i7_index = demult_out$qseqid.f,
                             i5_index = demult_out$qseqid.r,
@@ -937,6 +943,33 @@ doEditcall <- function(demult_out, align_out, editcall_dir){
         return(out)
     })
     editcall_out <- do.call("rbind", editcall_out)
+    
+    # Calculate total read numbers for each sample
+    total_reads_per_sample <- tapply(demult_out$sseqid, demult_out$index_pair_id, length)
+    total_reads_df <- data.frame(index_pair_id = names(total_reads_per_sample),
+                                 total_reads = as.numeric(total_reads_per_sample))
+    
+    # Add sample information if sample_list is provided
+    if(!is.null(sample_list)){
+        sample_info <- read.csv(sample_list, header = FALSE)
+        names(sample_info) <- c("index_pair_id", "sample_name", "plate_id", "row_id", "col_id")
+        
+        # Merge sample information with editcall_out
+        editcall_out <- left_join(editcall_out, sample_info, by = "index_pair_id")
+        
+        # Merge total reads information
+        editcall_out <- left_join(editcall_out, total_reads_df, by = "index_pair_id")
+        
+        # Reorder columns to put sample info and total reads at the end
+        gene_cols <- setdiff(names(editcall_out), c("index_pair_id", "sample_id", "data_type", 
+                                                   "sample_name", "plate_id", "row_id", "col_id", "total_reads"))
+        editcall_out <- editcall_out[, c("index_pair_id", "sample_id", "data_type", gene_cols,
+                                        "sample_name", "plate_id", "row_id", "col_id", "total_reads")]
+    } else {
+        # Just add total reads if no sample_list provided
+        editcall_out <- left_join(editcall_out, total_reads_df, by = "index_pair_id")
+    }
+    
     editcall_fn <- file.path(editcall_dir, "editcall_summary.csv")
     write.csv(editcall_out, editcall_fn, row.names = FALSE)
     return(editcall_out)
@@ -1139,6 +1172,13 @@ editViewer <- function(out_dir, sample_list){
     edit_result$plate <- sample_list$V3[hit]
     edit_result$row <- sample_list$V4[hit]
     edit_result$col <- sample_list$V5[hit]
+    
+    # Add total reads information if available
+    if("total_reads" %in% names(edit_result)){
+        edit_result$total_reads_display <- paste0("n=", edit_result$total_reads)
+    } else {
+        edit_result$total_reads_display <- ""
+    }
     edit_result_pat <- apply(subset(edit_result,
                                     select = -c(index_pair_id, name:col)),
                              1,
@@ -1155,7 +1195,7 @@ editViewer <- function(out_dir, sample_list){
     edit_result$uniq[dup_list$dup] <- "Uniq"
     edit_result$uniq[edit_result$name == "" | is.na(edit_result$name)] <- ""
     long_edit_result <- tidyr::pivot_longer(edit_result,
-                                            cols = -c(index_pair_id, name:uniq),
+                                            cols = -c(index_pair_id, name:col, total_reads_display),
                                             names_to = "gene",
                                             values_to = "edit")
 
@@ -1200,6 +1240,7 @@ editViewer <- function(out_dir, sample_list){
             ggplot2::geom_tile(ggplot2::aes(x = sub("_.+", "", gene), y = 0, fill = edit_eval)) +
             ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1.6, label = name), vjust = 1, hjust = 0.5, size = 3) +
             ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1, label = uniq), vjust = 1, hjust = 0.5, size = 2.5) +
+            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 0.4, label = total_reads_display), vjust = 1, hjust = 0.5, size = 2) +
             ggplot2::facet_grid(rows = ggplot2::vars(row), cols = ggplot2::vars(col), switch = "y") +
             ggplot2::scale_fill_manual(values = c("yellow", "darkblue", "blue",
                                                   "lightblue", "darkgreen", "green"),
