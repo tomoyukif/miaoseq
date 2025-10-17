@@ -1107,10 +1107,10 @@ evalMiao <- function(out_dir, output_reads){
 #'   this order:
 #'   1) `index_pair_id`, 2) `sample_name`, 3) `plate_id`, 4) `row_id`,
 #'   5) `col_id`. Example rows:
-#'   
+#'
 #'   miaoBC0001,Sample_A,1,A,1
 #'   miaoBC0002,Sample_B,1,A,2
-#'   
+#'
 #'   The values are used to annotate plots (sample name) and to facet by plate
 #'   and well coordinates (row, col).
 #' @return Invisibly, a character vector of generated PDF file paths.
@@ -1153,7 +1153,7 @@ editViewer <- function(out_dir, sample_list){
     dup_list <- dup_list[order(dup_list$i), ]
     edit_result$uniq <- "Dup"
     edit_result$uniq[dup_list$dup] <- "Uniq"
-
+    edit_result$uniq[edit_result$name == "" | is.na(edit_result$name)] <- ""
     long_edit_result <- tidyr::pivot_longer(edit_result,
                                             cols = -c(index_pair_id, name:uniq),
                                             names_to = "gene",
