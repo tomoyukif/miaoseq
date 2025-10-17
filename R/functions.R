@@ -945,7 +945,7 @@ doEditcall <- function(demult_out, align_out, editcall_dir, sample_list = NULL){
     editcall_out <- as.data.frame(editcall_out)
 
     # Calculate total read numbers for each sample
-    total_reads_per_sample <- tapply(demult_out$sseqid, demult_out$index_pair_id, length)
+    total_reads_per_sample <- tapply(edit_df_filtered$count, edit_df_filtered$index_pair_id, sum)
     total_reads_df <- data.frame(index_pair_id = names(total_reads_per_sample),
                                  total_reads = as.numeric(total_reads_per_sample))
 
