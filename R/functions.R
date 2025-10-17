@@ -1146,9 +1146,10 @@ evalMiao <- function(out_dir, output_reads){
 #'
 #'   The values are used to annotate plots (sample name) and to facet by plate
 #'   and well coordinates (row, col).
+#' @param onefile If TRUE, draw plots in one PDF file, otherwise separate PDF files.
 #' @return Invisibly, a character vector of generated PDF file paths.
 #' @export
-editViewer <- function(out_dir, sample_list){
+editViewer <- function(out_dir, sample_list, onefile = FALSE){
     if(!dir.exists(out_dir)){
         stop("out_dir does not exist: ", out_dir)
     }
@@ -1195,7 +1196,7 @@ editViewer <- function(out_dir, sample_list){
     edit_result$uniq[dup_list$dup] <- "Uniq"
     edit_result$uniq[edit_result$name == "" | is.na(edit_result$name)] <- ""
     long_edit_result <- tidyr::pivot_longer(edit_result,
-                                            cols = -c(index_pair_id, name:col, total_reads_display),
+                                            cols = -c(index_pair_id, sample_name:uniq),
                                             names_to = "gene",
                                             values_to = "edit")
 
@@ -1231,16 +1232,19 @@ editViewer <- function(out_dir, sample_list){
                      "alt", "alt_inframe_het", "alt_inframe_homo",
                      "het", "het_inframe")
     long_edit_result$edit_eval <- factor(long_edit_result$edit_eval, eval_levels)
-    long_edit_result <- subset(long_edit_result, name != "")
     n_gene <- length(unique(long_edit_result$gene))
 
     out_files <- character(0)
+    if(onefile){
+        pdf_fn <- file.path(plot_dir, "edit_viewer_plate.pdf")
+        pdf(pdf_fn, width = 11.69, height = 8.27)
+    }
     for(i in unique(long_edit_result$plate)){
         p <- ggplot2::ggplot(subset(long_edit_result, plate == i)) +
             ggplot2::geom_tile(ggplot2::aes(x = sub("_.+", "", gene), y = 0, fill = edit_eval)) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1.6, label = name), vjust = 1, hjust = 0.5, size = 3) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1, label = uniq), vjust = 1, hjust = 0.5, size = 2.5) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 0.4, label = total_reads_display), vjust = 1, hjust = 0.5, size = 2) +
+            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 2, label = name), vjust = 1, hjust = 0.5, size = 4) +
+            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1.4, label = uniq), vjust = 1, hjust = 0.5, size = 3) +
+            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 0.9, label = total_reads_display), vjust = 1, hjust = 0.5, size = 3) +
             ggplot2::facet_grid(rows = ggplot2::vars(row), cols = ggplot2::vars(col), switch = "y") +
             ggplot2::scale_fill_manual(values = c("yellow", "darkblue", "blue",
                                                   "lightblue", "darkgreen", "green"),
@@ -1252,11 +1256,20 @@ editViewer <- function(out_dir, sample_list){
                            axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, size = 7),
                            axis.ticks.y = ggplot2::element_blank(),
                            panel.grid = ggplot2::element_blank())
-        pdf_fn <- file.path(plot_dir, paste0("edit_viewer_plate", i, ".pdf"))
-        grDevices::pdf(pdf_fn, width = 11, height = 6)
-        print(p)
-        grDevices::dev.off()
+
+        if(!onefile){
+            pdf_fn <- file.path(plot_dir, paste0("edit_viewer_plate", i, ".pdf"))
+            pdf(pdf_fn, width = 11.69, height = 8.27)
+            print(p)
+            dev.off()
+        } else {
+            print(p)
+        }
         out_files <- c(out_files, pdf_fn)
+    }
+
+    if(onefile){
+        dev.off()
     }
     invisible(out_files)
 }
