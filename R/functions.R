@@ -937,39 +937,39 @@ doEditcall <- function(demult_out, align_out, editcall_dir, sample_list = NULL){
         colnames(out) <- out[1, ]
         out <- out[-1, ]
         out <- cbind(index_pair_id = i_df$index_pair_id[1],
-                     sample_id = i_df$sample_id[1],
                      data_type = c("genotype", "seq", "count"),
                      out)
         return(out)
     })
     editcall_out <- do.call("rbind", editcall_out)
-    
+    editcall_out <- as.data.frame(editcall_out)
+
     # Calculate total read numbers for each sample
     total_reads_per_sample <- tapply(demult_out$sseqid, demult_out$index_pair_id, length)
     total_reads_df <- data.frame(index_pair_id = names(total_reads_per_sample),
                                  total_reads = as.numeric(total_reads_per_sample))
-    
+
     # Add sample information if sample_list is provided
     if(!is.null(sample_list)){
         sample_info <- read.csv(sample_list, header = FALSE)
         names(sample_info) <- c("index_pair_id", "sample_name", "plate_id", "row_id", "col_id")
-        
+
         # Merge sample information with editcall_out
         editcall_out <- left_join(editcall_out, sample_info, by = "index_pair_id")
-        
+
         # Merge total reads information
         editcall_out <- left_join(editcall_out, total_reads_df, by = "index_pair_id")
-        
+
         # Reorder columns to put sample info and total reads at the end
-        gene_cols <- setdiff(names(editcall_out), c("index_pair_id", "sample_id", "data_type", 
+        gene_cols <- setdiff(names(editcall_out), c("index_pair_id", "data_type",
                                                    "sample_name", "plate_id", "row_id", "col_id", "total_reads"))
-        editcall_out <- editcall_out[, c("index_pair_id", "sample_id", "data_type", gene_cols,
+        editcall_out <- editcall_out[, c("index_pair_id", "data_type", gene_cols,
                                         "sample_name", "plate_id", "row_id", "col_id", "total_reads")]
     } else {
         # Just add total reads if no sample_list provided
         editcall_out <- left_join(editcall_out, total_reads_df, by = "index_pair_id")
     }
-    
+
     editcall_fn <- file.path(editcall_dir, "editcall_summary.csv")
     write.csv(editcall_out, editcall_fn, row.names = FALSE)
     return(editcall_out)
@@ -1172,7 +1172,7 @@ editViewer <- function(out_dir, sample_list){
     edit_result$plate <- sample_list$V3[hit]
     edit_result$row <- sample_list$V4[hit]
     edit_result$col <- sample_list$V5[hit]
-    
+
     # Add total reads information if available
     if("total_reads" %in% names(edit_result)){
         edit_result$total_reads_display <- paste0("n=", edit_result$total_reads)
