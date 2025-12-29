@@ -6,7 +6,7 @@
 This function evaluates the alignments of reads to amplicon sequences and performs edit-calling.
 It summarizes the edit-calling results and saves them to output files.}
 \usage{
-doEditcall(demult_out, align_out, editcall_dir)
+doEditcall(demult_out, align_out, editcall_dir, sample_list = NULL)
 }
 \arguments{
 \item{demult_out}{A data frame summarizing the demultiplexing results.}
@@ -14,6 +14,9 @@ doEditcall(demult_out, align_out, editcall_dir)
 \item{align_out}{A data frame summarizing the alignment results.}
 
 \item{editcall_dir}{Path to the output directory where edit-calling results will be saved.}
+
+\item{sample_list}{Optional path to a CSV file mapping index pairs to sample information.
+If provided, adds sample names and total read counts to the summary.}
 }
 \value{
 A data frame summarizing the edit-calling results.

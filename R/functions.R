@@ -122,6 +122,8 @@ prepAmpliconDB <- function(blast_path,
     ref_genome <- readDNAStringSet(db_path)
     amplicon_seq <- ref_genome[amplicon_gr]
     names(amplicon_seq) <- amplicon_gr$id
+    amplicon_fn <- file.path(ref_dir, "amplicon.csv")
+    write.csv(amplicon_df, amplicon_fn)
     amplicon_fn <- file.path(ref_dir, "amplicon.fa")
     writeXStringSet(amplicon_seq, amplicon_fn)
     return(amplicon_fn)
@@ -147,30 +149,33 @@ prepAmpliconDB <- function(blast_path,
                         task = "blastn-short",
                         outfmt = "short",
                         word_size = 4,
-                        n_core){
+                        n_core,
+                        not_run = FALSE){
     if(outfmt == "short"){
         outfmt <- "'6 qseqid sseqid qstart qend sstart send length pident'"
 
     } else {
         outfmt <- "'6 qseqid sseqid qstart qend qlen sstart send slen mismatch gapopen sseq qseq'"
     }
-    blast_args <- paste(paste("-query", query_fn),
-                        paste("-db", db_path),
-                        paste("-task", task),
-                        "-max_target_seqs 1000000",
-                        "-max_hsps 1",
-                        paste("-outfmt", outfmt),
-                        paste("-num_threads", n_core),
-                        paste("-out", blastout_fn))
+    if(!not_run){
+        blast_args <- paste(paste("-query", query_fn),
+                            paste("-db", db_path),
+                            paste("-task", task),
+                            "-max_target_seqs 1000000",
+                            "-max_hsps 1",
+                            paste("-outfmt", outfmt),
+                            paste("-num_threads", n_core),
+                            paste("-out", blastout_fn))
 
-    if(!is.null(word_size)){
-        blast_args <- paste(blast_args,
-                            paste("-word_size", word_size))
+        if(!is.null(word_size)){
+            blast_args <- paste(blast_args,
+                                paste("-word_size", word_size))
+        }
+
+        system2(command = file.path(blast_path, "blastn"),
+                args = blast_args,
+                stdout = FALSE)
     }
-
-    system2(command = file.path(blast_path, "blastn"),
-            args = blast_args,
-            stdout = FALSE)
     return(blastout_fn)
 }
 
@@ -269,13 +274,35 @@ miaoEditcall <- function(in_dir,
                          pam_list,
                          index_list,
                          genome_fn,
+                         mmi_fn = NULL,
+                         bed_fn = NULL,
                          amplicon_fn,
                          size_sel,
                          check_window = 10,
+                         strict = FALSE,
                          n_core = 1,
                          resume = FALSE,
                          sample_list = NULL){
     basecall_dir <- file.path(out_dir, "basecall")
+    demult_dir <- file.path(out_dir, "demultiplex")
+    align_dir <- file.path(out_dir, "align")
+    editcall_dir <- file.path(out_dir, "editcall")
+
+    if(!resume){
+        if(dir.exists(basecall_dir)){
+            unlink(basecall_dir, recursive = TRUE, force = TRUE)
+        }
+        if(dir.exists(demult_dir)){
+            unlink(demult_dir, recursive = TRUE, force = TRUE)
+        }
+        if(dir.exists(align_dir)){
+            unlink(align_dir, recursive = TRUE, force = TRUE)
+        }
+        if(dir.exists(editcall_dir)){
+            unlink(editcall_dir, recursive = TRUE, force = TRUE)
+        }
+    }
+
     dir.create(basecall_dir, recursive = TRUE, showWarnings = FALSE)
     basecall_fn <- file.path(basecall_dir, "basecall.finish")
     if(resume && file.exists(basecall_fn)){
@@ -289,11 +316,12 @@ miaoEditcall <- function(in_dir,
                                   size_sel = size_sel,
                                   dorado_path = dorado_path,
                                   samtools_path = samtools_path,
+                                  mmi_fn = mmi_fn,
+                                  bed_fn = bed_fn,
                                   n_core = n_core)
 
     }
 
-    demult_dir <- file.path(out_dir, "demultiplex")
     dir.create(demult_dir, recursive = TRUE, showWarnings = FALSE)
     demult_fn <- file.path(demult_dir, "demultiplex_list.csv")
     if(resume && file.exists(demult_fn)){
@@ -307,7 +335,6 @@ miaoEditcall <- function(in_dir,
                                     index_list = index_list)
     }
 
-    align_dir <- file.path(out_dir, "align")
     dir.create(align_dir, recursive = TRUE, showWarnings = FALSE)
     align_fn <- file.path(align_dir, "alignment_list.csv")
     if(resume && file.exists(align_fn)){
@@ -328,7 +355,6 @@ miaoEditcall <- function(in_dir,
                              check_window = check_window)
     }
 
-    editcall_dir <- file.path(out_dir, "editcall")
     dir.create(editcall_dir, recursive = TRUE, showWarnings = FALSE)
     editcall_fn <- file.path(editcall_dir, "editcall_summary.csv")
     if(resume && file.exists(editcall_fn)){
@@ -339,7 +365,8 @@ miaoEditcall <- function(in_dir,
         editcall_out <- doEditcall(demult_out = demult_out,
                                    align_out = align_out,
                                    editcall_dir = editcall_dir,
-                                   sample_list = sample_list)
+                                   sample_list = sample_list,
+                                   strict = strict)
     }
     return(editcall_out)
 }
@@ -352,7 +379,6 @@ miaoEditcall <- function(in_dir,
                          pam_list,
                          index_list,
                          amplicon_fn){
-
 }
 
 ################################################################################
@@ -383,13 +409,22 @@ doBasecall <- function(in_dir,
                        size_sel = c(0, Inf),
                        dorado_path,
                        samtools_path,
+                       mmi_fn = NULL,
+                       bed_fn = NULL,
                        n_core){
     bam_fn <- file.path(basecall_dir, "basecall.bam")
+    args <- paste("duplex sup", in_dir,
+                  "--threads", n_core,
+                  "--min-qscore 10")
+    if(!is.null(mmi_fn)){
+        args <- paste(args, "--reference", mmi_fn)
+        if(!is.null(bed_fn)){
+            args <- paste(args, "--bed-file", bed_fn)
+        }
+    }
+
     system2(command = dorado_path,
-            args = paste("duplex sup", in_dir,
-                         "--threads", n_core,
-                         "--min-qscore 10 > ", bam_fn
-            ))
+            args = paste(args, ">", bam_fn))
 
     summary_out <- file.path(basecall_dir, "basecalls_summary.tsv")
     system2(command = dorado_path,
@@ -566,7 +601,6 @@ doDemultiplex <- function(blast_path, basecall_fn, demult_dir, index_list){
         fr_compl_match <- NULL
     }
 
-
     fr_best_subset <- subset(fr_best_rest, select = c(qseqid.f, sseqid, qseqid.r))
     fr_best_subset <- unique(fr_best_subset)
     fr_single_match <- table(fr_best_subset$sseqid)
@@ -666,14 +700,20 @@ doAlign <- function(blast_path,
                                  sub("\\.fq", "", basecall_fn[i])),
                              blastout_suffix,
                              sep = "_")
-        i_ampl_hit_fn <- .run_blastn(blast_path = blast_path,
-                                     query_fn = amplicon_fn,
-                                     db_path = basecall_fn[i],
-                                     blastout_fn = blastout_fn,
-                                     task = "blastn",
-                                     outfmt = "long",
-                                     word_size = NULL,
-                                     n_core = n_core)
+        if(file.exists(blastout_fn)){
+            i_ampl_hit_fn <- blastout_fn
+
+        } else {
+            i_ampl_hit_fn <- .run_blastn(blast_path = blast_path,
+                                         query_fn = amplicon_fn,
+                                         db_path = basecall_fn[i],
+                                         blastout_fn = blastout_fn,
+                                         task = "blastn",
+                                         outfmt = "long",
+                                         word_size = NULL,
+                                         n_core = n_core,
+                                         not_run = FALSE)
+        }
         ampl_hit_fn <- c(ampl_hit_fn, i_ampl_hit_fn)
     }
 
@@ -683,23 +723,43 @@ doAlign <- function(blast_path,
                                       outfmt = "long")
         ampl_hit <- rbind(ampl_hit, i_ampl_hit)
     }
-
+    ampl_hit$index <- seq_len(nrow(ampl_hit))
     n_id_hit <- table(ampl_hit$sseqid)
     single_hit <- names(n_id_hit)[n_id_hit == 1]
-    multi_hit <- ampl_hit[!ampl_hit$sseqid %in% single_hit, ]
-    single_hit <- ampl_hit[ampl_hit$sseqid %in% single_hit, ]
-    multi_hit_check <- tapply(seq_along(multi_hit$sseqid), multi_hit$sseqid, function(i){
-        q_start <- multi_hit$qstat[i]
-        q_end <- multi_hit$qend[i]
-        inside <- q_start >= q_start[1] & q_end <= tail(q_end, 1)
-        return(all(inside))
-    })
-    multi_hit_check <- unlist(multi_hit_check)
-    if(any(!multi_hit_check)){
-        stop("Multiple hit reads")
-    }
+    multi_hit <- subset(ampl_hit,
+                        subset = !sseqid %in% single_hit,
+                        select = c(sseqid, sstart, send, index))
+    flip <- multi_hit$sstart > multi_hit$send
+    tmp <- multi_hit$sstart[flip]
+    multi_hit$sstart[flip] <- multi_hit$send[flip]
+    multi_hit$send[flip] <- tmp
 
-    ampl_hit <- ampl_hit[!duplicated(ampl_hit$sseqid), ]
+    invalid_multi_hit_reads <- tapply(seq_along(multi_hit$sseqid),
+                                      multi_hit$sseqid,
+                                      function(i){
+                                          inside <- sapply(i, function(j){
+                                              k <- setdiff(i, j)
+                                              check_start <- multi_hit$sstart[j] >= multi_hit$sstart[k]
+                                              check_end <- multi_hit$send[j] <= multi_hit$send[k]
+                                              return(any(check_start & check_end))
+                                          })
+                                          if(sum(!inside) > 1){
+                                              return(multi_hit$index[i])
+
+                                          } else {
+                                              len <- multi_hit$send[i] - multi_hit$sstart[i]
+                                              max_len <- max(len)
+                                              which_max <- len == max_len
+                                              if(sum(which_max) > 1){
+                                                  return(multi_hit$index[i])
+
+                                              } else {
+                                                  return(multi_hit$index[i[!which_max]])
+                                              }
+                                          }
+                                      })
+
+    ampl_hit <- subset(ampl_hit, subset = !index %in% unlist(invalid_multi_hit_reads))
 
     amplicon_seq <- readDNAStringSet(amplicon_fn)
     genome <- readDNAStringSet(genome_fn)
@@ -747,11 +807,14 @@ doAlign <- function(blast_path,
 
     target <- names(amplicon_seq)
     aln_pos$target <- target
+    if(!is.null(edit_site$V4)){
+        aln_pos$guide_id <- edit_site$V4
+    }
     align_out <- NULL
-    for(i in seq_along(target)){
-        target_gene <- target[i]
+    for(i in seq_along(aln_pos$target)){
+        target_gene <- aln_pos$target[i]
         i_hit <- subset(ampl_hit, subset = qseqid == target_gene)
-        i_aln_pos <- subset(aln_pos, subset = target == target_gene)
+        i_aln_pos <- aln_pos[i, ]
         s_cover_edit_site <- i_hit$qstart <= i_aln_pos$start
         e_cover_edit_site <- i_hit$qend >= i_aln_pos$start
         cover_edit_site <- s_cover_edit_site & e_cover_edit_site
@@ -791,7 +854,15 @@ doAlign <- function(blast_path,
             return(c(j_target, j_query))
         })
         i_target <- do.call("rbind", i_target)
-        i_out <- data.frame(target_gene = i_hit$qseqid,
+
+        if(!is.null(aln_pos$guide_id)){
+            if(all(!aln_pos$guide_id[i] %in% c("", NA))){
+                target_gene <- paste(target_gene, aln_pos$guide_id[i], sep = "_")
+                names(intact_seq)[i] <- target_gene
+            }
+        }
+
+        i_out <- data.frame(target_gene = target_gene,
                             read_name = i_hit$sseqid,
                             read_seq = i_target[, 1],
                             ref_seq = i_target[, 2])
@@ -803,7 +874,11 @@ doAlign <- function(blast_path,
     full_amplicon <- data.frame(read_name = ampl_hit$sseqid,
                                 full_read_seq = ampl_hit$sseq,
                                 aln_start = ampl_hit$sstart,
-                                aln_end = ampl_hit$send)
+                                aln_end = ampl_hit$send,
+                                query_start = ampl_hit$qstart,
+                                query_end = ampl_hit$qend,
+                                query_length = ampl_hit$qlen)
+    full_amplicon$query_align <- full_amplicon$query_end - full_amplicon$query_start + 1
     full_amplicon <- unique(full_amplicon)
     align_out <- left_join(align_out, full_amplicon, "read_name")
 
@@ -835,13 +910,36 @@ doAlign <- function(blast_path,
 #' @importFrom methods as
 #' @export
 #'
-doEditcall <- function(demult_out, align_out, editcall_dir, sample_list = NULL){
-    demult_df <- data.frame(read_name = demult_out$sseqid,
-                            i7_index = demult_out$qseqid.f,
-                            i5_index = demult_out$qseqid.r,
-                            index_pair_id = demult_out$index_pair_id)
-    demult_df <- unique(demult_df)
-    align_out <- left_join(align_out, demult_df, "read_name")
+doEditcall <- function(demult_out, align_out, editcall_dir, sample_list = NULL, strict = FALSE){
+    demult_out$read_name <- demult_out$sseqid
+    align_out <- left_join(align_out,
+                           subset(demult_out,
+                                  select = c(read_name, qstart.f:qlen.f,
+                                             qstart.r:qlen.r, send.f, send.r,
+                                             qseqid.f, qseqid.r, index_pair_id)),
+                           "read_name")
+    align_out <- align_out[!is.na(align_out$target_gene), ]
+    align_out <- align_out[!is.na(align_out$index_pair_id), ]
+
+    if(strict){
+        check1 <- align_out$qstart.f == 1 & align_out$qend.f == align_out$qlen.f
+        check2 <- align_out$qstart.r == 1 & align_out$qend.r == align_out$qlen.r
+        check3 <- align_out$query_align == align_out$query_length
+
+        check4 <- align_out$send.f + 1 == align_out$aln_start
+        check5 <- align_out$send.f - 1 == align_out$aln_start
+        check6 <- align_out$send.r - 1 == align_out$aln_start
+        check7 <- align_out$send.r + 1 == align_out$aln_start
+        check8 <- check4 | check5 | check6 | check7
+
+        check9 <- align_out$send.f + 1 == align_out$aln_end
+        check10 <- align_out$send.f - 1 == align_out$aln_end
+        check11 <- align_out$send.r - 1 == align_out$aln_end
+        check12 <- align_out$send.r + 1 == align_out$aln_end
+        check13 <- check9| check10 | check11 | check12
+        valid <- check1 & check2 & check3 & check8 & check13
+        align_out <- align_out[valid, ]
+    }
 
     intact_seq <- attributes(align_out)$intact_seq
     edit_df <- tapply(seq_len(nrow(align_out)), align_out$index_pair_id, function(i){
@@ -962,9 +1060,9 @@ doEditcall <- function(demult_out, align_out, editcall_dir, sample_list = NULL){
 
         # Reorder columns to put sample info and total reads at the end
         gene_cols <- setdiff(names(editcall_out), c("index_pair_id", "data_type",
-                                                   "sample_name", "plate_id", "row_id", "col_id", "total_reads"))
+                                                    "sample_name", "plate_id", "row_id", "col_id", "total_reads"))
         editcall_out <- editcall_out[, c("index_pair_id", "data_type", gene_cols,
-                                        "sample_name", "plate_id", "row_id", "col_id", "total_reads")]
+                                         "sample_name", "plate_id", "row_id", "col_id", "total_reads")]
     } else {
         # Just add total reads if no sample_list provided
         editcall_out <- left_join(editcall_out, total_reads_df, by = "index_pair_id")
@@ -1241,7 +1339,7 @@ editViewer <- function(out_dir, sample_list, onefile = FALSE){
     }
     for(i in unique(long_edit_result$plate)){
         p <- ggplot2::ggplot(subset(long_edit_result, plate == i)) +
-            ggplot2::geom_tile(ggplot2::aes(x = sub("_.+", "", gene), y = 0, fill = edit_eval)) +
+            ggplot2::geom_tile(ggplot2::aes(x = gene, y = 0, fill = edit_eval)) +
             ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 2, label = name), vjust = 1, hjust = 0.5, size = 4) +
             ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1.4, label = uniq), vjust = 1, hjust = 0.5, size = 3) +
             ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 0.9, label = total_reads_display), vjust = 1, hjust = 0.5, size = 3) +

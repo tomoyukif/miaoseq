@@ -18,7 +18,8 @@ miaoEditcall(
   size_sel,
   check_window = 10,
   n_core = 1,
-  resume = FALSE
+  resume = FALSE,
+  sample_list = NULL
 )
 }
 \arguments{
@@ -49,6 +50,9 @@ miaoEditcall(
 \item{n_core}{Number of CPU cores to use for parallel processing.}
 
 \item{resume}{Logical indicating whether to resume from a previous run if output files already exist.}
+
+\item{sample_list}{Optional path to a CSV file mapping index pairs to sample information.
+If provided, adds sample names and total read counts to the summary.}
 }
 \value{
 A data frame summarizing the edit-calling results.
