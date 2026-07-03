@@ -1,10 +1,19 @@
 Package: miaoseq
-Title: MiaoSeq - A comprehensive pipeline for sequencing data analysis
-Version: 0.0.5
-Date: 2025-12-29
+Title: MiaoSeq — CRISPR Edit Analysis from Indexed Nanopore Amplicon Sequencing
+Version: 0.1.0
+Date: 2026-07-03
 Authors@R: 
     person("Tomoyuki", "Furuta", , "f.tomoyuki@okayama-u.ac.jp", role = c("aut", "cre"))
-Description: MiaoSeq provides a comprehensive pipeline for sequencing data analysis including basecalling, demultiplexing, alignment, and edit calling. The package integrates multiple bioinformatics tools and provides streamlined workflows for processing sequencing data.
+Description: MiaoSeq analyzes multiplexed indexed amplicon Oxford Nanopore
+    sequencing (MIAOseq) data to characterize CRISPR-Cas genome editing
+    outcomes. The package provides two complementary workflows: a legacy
+    read-level pipeline (basecalling, BLAST demultiplexing, alignment, and
+    edit calling via miaoEditcall), and a refless cluster-consensus pipeline
+    (doDemultiplex2, per-sample clustering, pileup consensus, confidence
+    metrics, optional chimera detection, and consensus-based edit calling via
+    doEditCalling). Utilities include plate-level result visualization
+    (editViewer), run quality reporting (writeReflessReport), and index-set
+    design evaluation (evaluateIndexSet).
 License: `use_mit_license()`
 Encoding: UTF-8
 Imports:

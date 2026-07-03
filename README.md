@@ -1,300 +1,486 @@
 # miaoseq
 
-**miaoseq** is an R package that provides a comprehensive analysis pipeline for multiplexed indexed amplicon ONT sequencing (MIAOseq), enabling the analysis of CRISPR-Cas9 editing outcomes from Oxford Nanopore MinION data. The package includes tools for basecalling, demultiplexing, read alignment, and edit-calling.
+**miaoseq** is an R package for analyzing multiplexed indexed amplicon Oxford Nanopore sequencing (MIAOseq) data and characterizing CRISPR-Cas genome editing outcomes.
 
-## Overview
+The package provides **two workflows**:
 
-The miaoseq pipeline processes raw MinION sequencing data (pod5 format) through the following steps:
+| Workflow | Entry point | Best for |
+|----------|-------------|----------|
+| **Legacy (read-level)** | `miaoEditcall()` | Pod5 → basecall → BLAST demux/align → per-read edit calling |
+| **Refless (cluster-consensus)** | `miaoPipeline()` | Pre-basecalled FASTQ → edit-distance demux → clustering → consensus edit calling |
 
-1. **Basecalling**: Converts raw electrical signals to DNA sequences using Dorado
-2. **Demultiplexing**: Assigns reads to samples based on index sequences using BLAST
-3. **Read Alignment**: Aligns reads to amplicon sequences using BLAST
-4. **Edit-calling**: Identifies and characterizes CRISPR-Cas9 editing outcomes
-5. **Evaluation**: Generates comprehensive statistical summaries
+Both workflows share plate visualization via `editViewer()`.
 
-## Prerequisites
+---
 
-### External Software Requirements
+## Table of contents
 
-miaoseq requires three external tools that must be installed separately from R:
+1. [System requirements](#system-requirements)
+2. [Installation](#installation)
+3. [Environment setup](#environment-setup)
+   - [R dependencies](#r-dependencies)
+   - [Legacy pipeline tools](#legacy-pipeline-tools)
+   - [Refless pipeline tools](#refless-pipeline-tools)
+   - [Apptainer image (recommended for refless)](#apptainer-image-recommended-for-refless)
+   - [Environment variables](#environment-variables)
+4. [Input file formats](#input-file-formats)
+5. [Usage: refless pipeline](#usage-refless-pipeline)
+6. [Usage: legacy pipeline](#usage-legacy-pipeline)
+7. [Edit calling and visualization](#edit-calling-and-visualization)
+8. [Output directories](#output-directories)
+9. [Troubleshooting](#troubleshooting)
+10. [Performance notes](#performance-notes)
 
-#### 1. Dorado (Oxford Nanopore Technologies)
-Dorado is used for basecalling raw MinION data.  
-For installation instructions, please visit:  
-https://github.com/nanoporetech/dorado
+---
 
-#### 2. BLAST (NCBI)
-BLAST is used for sequence alignment and demultiplexing.  
-For installation instructions, please visit:  
-https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE_TYPE=BlastDocs&DOC_TYPE=Download
+## System requirements
 
-#### 3. Samtools
-Samtools is used for BAM file processing.  
-For installation instructions, please visit:  
-https://github.com/samtools/samtools
+- **OS**: Linux (tested on Ubuntu). macOS may work for R-only steps; external tools and Apptainer are Linux-oriented.
+- **R**: ≥ 4.2 recommended.
+- **RAM**: 16–32 GB for typical 384-well Flongle runs (legacy pipeline); refless pipeline is lighter per sample but clustering benefits from available memory.
+- **CPU**: Multi-core recommended (`n_core` in legacy pipeline; mmseqs2/vsearch use multiple threads internally).
 
-### R Package Dependencies
-
-miaoseq requires several R packages that will be installed automatically:
-
-- **Biostrings**: For DNA sequence manipulation
-- **dplyr**: For data manipulation
-- **GenomicRanges**: For genomic interval operations
-- **IRanges**: For interval operations
-- **BiocGenerics**: For generic functions
-- **pwalign**: For pairwise sequence alignment
-
+---
 
 ## Installation
 
-### Install miaoseq
-
 ```r
-# Install miaoseq from GitHub using devtools:
-devtools::install_github("tomoyukif/miaoseq")
-```
+# From GitHub (refless branch or main):
+devtools::install_github("tomoyukif/miaoseq", ref = "refless")
 
-### Load the package
-
-```r
 library(miaoseq)
 ```
 
-## Usage Guide
-
-### Step 1: Set up your analysis
-
-First, define the paths and parameters for your analysis:
+For local development from a cloned repository:
 
 ```r
-# Load the package
-source("R/functions.R")
-
-# Define working directories
-working_dir <- "/path/to/your/working/directory"
-out_dir <- file.path(working_dir, "output_directory_name")
-in_dir <- "/path/to/pod5/directory"  # MinION outputs raw sequence data files in a pod5 directory
-
-# Reference files
-genome_fn <- '/reference/genome/sequence.fa'  # Reference genome sequence in FASTA format
-pam_list <- system.file("extdata", "agr8_pam_list.csv", package = "miaoseq")  # PAM site information installed with the package
-index_list <- system.file("extdata", "index_list.csv", package = "miaoseq")   # Index sequences for demultiplexing
-primer_list <- system.file("extdata", "amplicon_primers.csv", package = "miaoseq")  # Primer sequences
-
-# External tool paths
-dorado_path <- "/path/to/dorado"              # Path to dorado executable
-samtools_path <- "/path/to/samtools"          # Path to samtools executable
-blast_path <- "/path/to/blast/bin"            # Path to a directory containing blast executables (makeblastdb and blastn)
-
-# Analysis parameters
-n_core <- 30  # Number of CPU cores to use
+devtools::load_all()   # or devtools::install()
 ```
 
-### Step 2: Prepare amplicon database
+Release notes are in [`inst/NEWS.md`](inst/NEWS.md).
 
-The `prepAmpliconDB()` function extracts amplicon sequences from your reference genome based on primer sequences:
+---
+
+## Environment setup
+
+### R dependencies
+
+Installed automatically with the package:
+
+| Package | Purpose |
+|---------|---------|
+| Biostrings | Sequence I/O and manipulation |
+| pwalign | End-window alignment in `doDemultiplex2()` |
+| GenomicRanges, IRanges | Genomic interval operations |
+| dplyr | Data frame joins |
+| BiocGenerics, methods, stats, tools, utils | Core utilities |
+
+**Suggested** packages (not hard dependencies):
+
+| Package | Purpose |
+|---------|---------|
+| ggplot2, tidyr | Used by `editViewer()` for plate heatmaps |
+| devtools | Package installation from GitHub |
 
 ```r
-# Prepare amplicon database
-amplicon_fn <- prepAmpliconDB(blast_path = blast_path,
-                              primer_list = primer_list,
-                              genome_fn = genome_fn,
-                              out_dir = out_dir,
-                              n_core = n_core)
-
-# The function returns the path to the generated amplicon FASTA file
-amplicon_fn <- file.path(out_dir, "ref/amplicon.fa")
+install.packages(c("ggplot2", "tidyr", "devtools"))
 ```
 
-**What this step does:**
-- Reads primer sequences from the CSV file
-- Uses BLAST to locate primers in the reference genome
-- Extracts amplicon sequences between primer pairs
-- Creates an indexed amplicon database for read alignment
+### Legacy pipeline tools
 
-### Step 3: Run the main analysis pipeline
+Required only when running `miaoEditcall()`:
 
-The `miaoEditcall()` function orchestrates the entire analysis pipeline:
+| Tool | Role | Installation |
+|------|------|--------------|
+| [Dorado](https://github.com/nanoporetech/dorado) | Basecalling pod5 → FASTQ | ONT releases |
+| [NCBI BLAST+](https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE_TYPE=BlastDocs&DOC_TYPE=Download) | Demultiplexing and read alignment | `makeblastdb`, `blastn` |
+| [samtools](https://github.com/samtools/samtools) | BAM processing | conda or system package |
+
+Provide paths when calling `miaoEditcall()`:
 
 ```r
-# Call edits using the main pipeline
-editcall_out <- miaoEditcall(in_dir = in_dir,
-                             out_dir = out_dir,
-                             dorado_path = dorado_path,
-                             samtools_path = samtools_path,
-                             blast_path = blast_path,
-                             primer_list = primer_list,
-                             pam_list = pam_list,
-                             index_list = index_list,
-                             genome_fn = genome_fn,
-                             amplicon_fn = amplicon_fn,
-                             size_sel = c(300, 450),    # Valid range of read length for edit-calling (bp)
-                             check_window = 10,         # Window size around expected cut site (bp)
-                             n_core = n_core,
-                             resume = FALSE)             # Set to TRUE to resume from previous run
+dorado_path  <- "/path/to/dorado"
+blast_path   <- "/path/to/blast/bin"   # directory containing blastn
+samtools_path <- "/path/to/samtools"
 ```
 
-**Pipeline steps performed by `miaoEditcall()`:**
+### Refless pipeline tools
 
-1. **Basecalling**: Converts pod5 files to FASTQ using Dorado
-2. **Quality filtering**: Removes low-quality reads and applies size selection
-3. **Demultiplexing**: Assigns reads to samples based on index sequences
-4. **Read alignment**: Aligns reads to amplicon sequences
-5. **Edit-calling**: Identifies CRISPR-Cas9 editing outcomes
+Required when running `miaoPipeline()` and related functions:
 
-### Step 4: Generate evaluation report
+| Tool | Role | Required for |
+|------|------|--------------|
+| [MMseqs2](https://github.com/soedinglab/MMseqs2) | Fast linclust (default) | `cluster_method = "mmseqs2"` |
+| [minimap2](https://github.com/lh3/minimap2) | Cluster refinement; ref mapping in edit calling | `refine = TRUE`; `prepRefTargets()` |
+| [vsearch](https://github.com/torognes/vsearch) | meshclust clustering; chimera detection | `cluster_method = "meshclust"`; `detect_chimeras = TRUE` |
+| Python 3 + umap-learn, hdbscan, scikit-learn | UMAP pre-clustering | `cluster_method = "umap_meshclust"` |
 
-The `evalMiao()` function creates comprehensive statistical summaries:
+**Resolution order**: host `PATH` → environment variable override → Apptainer container (see below).
 
-```r
-# Generate statistical summary
-evalMiao(out_dir = out_dir,
-         output_reads = FALSE)  # Set to TRUE to output sequences of undemultiplexed reads for debugging
+Host install example (conda):
+
+```bash
+mamba create -n miaoseq-tools -c bioconda -c conda-forge \
+    mmseqs2 minimap2 vsearch python=3.11 umap-learn hdbscan scikit-learn
+conda activate miaoseq-tools
 ```
 
-**Output files created:**
-- `miao_summary/read_stats.tsv`: Overall read statistics
-- `miao_summary/indexed_reads_per_gene.tsv`: Demultiplexing statistics
-- `miao_summary/aligned_reads_per_gene.tsv`: Alignment statistics
-- `editcall/editcall_summary.csv`: Final edit-calling results
+### Apptainer image (recommended for refless)
 
-## Parameter Configuration
+The repository ships an Apptainer definition that bundles mmseqs2, minimap2, vsearch, samtools, and Python UMAP dependencies.
 
-### Key Parameters Explained
+**Prerequisites**: [Apptainer](https://apptainer.org/) (or Singularity) ≥ 1.1, and either `mksquashfs` (for `.sif`) or use the sandbox directly.
 
-- **`size_sel`**: `c(min_length, max_length)` - Range of read lengths to retain (in bp)
-  - Adjust based on your amplicon size
-  - Example: `c(300, 450)` for 300-450 bp amplicons
+```bash
+cd cursor_dev/apptainer
+bash build.sh
+```
 
-- **`check_window`**: Window size around expected cut site (in bp)
-  - Defines the region where edits are searched
-  - Example: `10` searches 10 bp upstream and downstream of cut site
+This creates:
 
-- **`n_core`**: Number of CPU cores for parallel processing
-  - Higher values speed up analysis but require more memory
-  - Recommended: 20-30 cores for typical datasets
+- `cursor_dev/apptainer/images/miaoseq-refless.sandbox` — always built
+- `cursor_dev/apptainer/images/miaoseq-refless.sif` — created if SIF conversion succeeds
 
-- **`resume`**: Whether to resume from previous run
-  - Set to `TRUE` if analysis was interrupted
-  - Skips completed steps and continues from where it left off
+Point miaoseq to the image:
 
-### Input File Formats
+```bash
+# Prefer SIF when available; fall back to sandbox
+export MIAOSEQ_REFLESS_SIF=/path/to/miaoseq-refless.sif
+# or
+export MIAOSEQ_REFLESS_SIF=/path/to/miaoseq-refless.sandbox
+```
 
-#### Primer List (`primer_list`)
-CSV file with two columns:
-- Column 1: Primer ID (must end with "_F" for forward, "_R" for reverse)
-- Column 2: Primer sequence
+If SIF conversion fails (`mksquashfs` error), the sandbox works identically:
 
-#### Index List (`index_list`)
-CSV file with five columns:
-- Column 1: Index pair ID
-- Column 2: Forward index ID
-- Column 3: Forward index sequence
-- Column 4: Reverse index ID
-- Column 5: Reverse index sequence
+```bash
+export MIAOSEQ_REFLESS_SIF=cursor_dev/apptainer/images/miaoseq-refless.sandbox
+```
 
-#### PAM List (`pam_list`)
-CSV file with three columns:
-- Column 1: Target gene name
-- Column 2: Chromosome number
-- Column 3: PAM position
+### Environment variables
 
-## Output Files
+| Variable | Description |
+|----------|-------------|
+| `MIAOSEQ_REFLESS_SIF` | Path to Apptainer `.sif` or `.sandbox` image |
+| `MIAOSEQ_MMSEQS_PATH` | Override mmseqs2 binary |
+| `MIAOSEQ_MINIMAP2_PATH` | Override minimap2 binary |
+| `MIAOSEQ_VSEARCH_PATH` | Override vsearch binary |
+| `MIAOSEQ_UMAP_SCRIPT` | Override path to `umap_kmer_cluster.py` |
+| `REFLESS_FASTQ` | Convenience variable used in sample scripts |
+| `REFLESS_OUT` | Output directory for sample scripts |
 
-The analysis creates several output directories:
+---
 
-- **`basecall/`**: Basecalling results and quality-filtered reads
-- **`demultiplex/`**: Demultiplexing results and sample assignments
-- **`align/`**: Read alignment results
-- **`editcall/`**: Edit-calling results and summaries
-- **`ref/`**: Reference files and amplicon database
-- **`miao_summary/`**: Statistical summaries and reports
+## Input file formats
 
-## Troubleshooting
+All CSV files below have **no header row**.
 
-### Common Issues
+### Index list (`index_list`)
 
-1. **External tool not found**
-   - Ensure all external tools (dorado, blast, samtools) are installed and in your PATH
-   - Check that the paths specified in the script are correct
+Five columns: `sample_id`, `forward_index_id`, `forward_index_seq`, `reverse_index_id`, `reverse_index_seq`.
 
-2. **Memory issues**
-   - Reduce `n_core` parameter if running out of memory
-   - Ensure sufficient disk space for intermediate files
+```
+miaoBC0001,miao_I7_index_001,CATACGAGATCGCTCAGTTCGTGACTGGAGTTCAGACGTGTG,miao_I5_index_001,CATACGAGATTCGTGGAGCGACACTCTTTCCCTACACGACG
+```
 
-3. **BLAST errors**
-   - Verify that BLAST executables (`makeblastdb`, `blastn`) are accessible
-   - Check that input sequences are in proper FASTA format
+Bundled files: `inst/extdata/index_list.csv` (full plate), `inst/extdata/index_list_smoke.csv` (2-sample smoke test).
 
-4. **Demultiplexing failures**
-   - Verify index sequences in your index list file
-   - Check that index sequences are present in your reads
+### Primer list (`primer_list`)
 
-### Getting Help
+Two columns: `primer_id` (must end with `_F` or `_R`), `sequence`.
 
-For issues or questions:
-1. Check the error messages carefully
-2. Verify all input files are properly formatted
-3. Ensure external tools are correctly installed
-4. Check that you have sufficient computational resources
+Bundled: `inst/extdata/amplicon_primers.csv`.
 
-## Example Workflow
+### PAM / gRNA list (`pam_list`)
 
-Here's a complete example workflow:
+Used by edit-calling modules. Columns: `gene`, `chromosome`, `cut_position` [, optional `guide_id`].
+
+Bundled: `inst/extdata/agr8_pam_list.csv`.
+
+### Sample layout (for `editViewer`)
+
+Five columns: `index_pair_id`, `sample_name`, `plate_id`, `row` (A–H), `col` (1–12).
+
+```
+miaoBC0001,Sample_A,1,A,1
+miaoBC0002,Sample_B,1,A,2
+```
+
+---
+
+## Usage: refless pipeline
+
+The refless workflow processes **pre-basecalled multiplexed FASTQ** through demultiplexing, per-sample clustering, consensus calling, and optional QC reporting.
+
+### Step 1 — Core pipeline
 
 ```r
-# Load package
-library("miaoseq")
+library(miaoseq)
 
-# Set up paths
-working_dir <- "/home/user/analysis"
-out_dir <- file.path(working_dir, "miaoseq_results")
-# The 'in_dir' variable should point to the directory containing your MinION raw data in pod5 format.
-# Typically, after a MinION run, pod5 files are located in a subdirectory named 'pod5'.
-in_dir <- "/data/minion_run/pod5"
-genome_fn <- "/reference/genome.fa"
-
-# External tool paths
-dorado_path <- "/usr/local/bin/dorado"
-samtools_path <- "/usr/local/bin/samtools"
-blast_path <- "/usr/local/bin"
-
-# Reference files
-pam_list <- system.file("extdata", "agr8_pam_list.csv", package = "miaoseq") 
-index_list <- system.file("extdata", "index_list.csv", package = "miaoseq") 
+fastq_fn    <- "multiplexed.fastq.gz"
+out_dir     <- "refless_output"
+index_list  <- system.file("extdata", "index_list.csv", package = "miaoseq")
 primer_list <- system.file("extdata", "amplicon_primers.csv", package = "miaoseq")
+sif_path    <- Sys.getenv("MIAOSEQ_REFLESS_SIF", "cursor_dev/apptainer/images/miaoseq-refless.sandbox")
 
-# Analysis parameters
-n_core <- 30
-size_sel <- c(300, 450)
-check_window <- 10
+results <- miaoPipeline(
+    fastq_fn         = fastq_fn,
+    index_list       = index_list,
+    primer_list      = primer_list,
+    out_dir          = out_dir,
+    cluster_method   = "mmseqs2",       # or "meshclust", "umap_meshclust"
+    sif_path         = if(file.exists(sif_path)) sif_path else NULL,
+    detect_chimeras  = TRUE,            # vsearch uchime_denovo per sample
+    write_report     = TRUE,            # HTML + CSV quality report
+    demultiplex_params = list(
+        end_window = 200,               # bp window at each read end
+        t_high     = 0.90,
+        t_low      = 0.75,
+        delta      = 0.05,
+        n_core     = 4
+    ),
+    cluster_params = list(
+        refine             = TRUE,      # minimap2 refinement
+        mmseqs_min_seq_id  = 0.85
+    ),
+    resume = FALSE
+)
 
-# Run analysis
-amplicon_fn <- prepAmpliconDB(blast_path = blast_path,
-                              primer_list = "primers.csv",
-                              genome_fn = genome_fn,
-                              out_dir = out_dir,
-                              n_core = n_core)
+table(results$demultiplex$class)
+```
 
-editcall_out <- miaoEditcall(in_dir = in_dir,
-                             out_dir = out_dir,
-                             dorado_path = dorado_path,
-                             samtools_path = samtools_path,
-                             blast_path = blast_path,
-                             primer_list = "primers.csv",
-                             pam_list = "pam_sites.csv",
-                             index_list = "indices.csv",
-                             genome_fn = genome_fn,
-                             amplicon_fn = amplicon_fn,
-                             size_sel = size_sel,
-                             check_window = check_window,
-                             n_core = n_core,
-                             resume = FALSE)
+A runnable template is in `cursor_dev/sample_script_refless.R`.
 
-# Generate summary
+### Step 2 — Edit calling (optional)
+
+Consensus-based edit calling replaces per-read BLAST alignment:
+
+```r
+genome_fn <- "/reference/genome.fa"
+pam_list  <- system.file("extdata", "agr8_pam_list.csv", package = "miaoseq")
+
+edit_results <- doEditCalling(
+    pipeline_results = results,
+    genome_fn        = genome_fn,
+    primer_list      = primer_list,
+    pam_list         = pam_list,
+    out_dir          = file.path(out_dir, "edit_calling"),
+    sif_path         = sif_path,
+    prefer_edited    = TRUE
+)
+```
+
+### Step 3 — Index design check (optional)
+
+```r
+ix <- evaluateIndexSet(index_list)
+ix$summary   # per-index-pair minimum edit distances
+ix$pairwise  # full distance matrix
+```
+
+### Key `miaoPipeline()` parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `cluster_method` | `"mmseqs2"` | `"mmseqs2"`, `"meshclust"`, or `"umap_meshclust"` |
+| `detect_chimeras` | `FALSE` | Run vsearch uchime_denovo; exclude chimeras from clustering |
+| `write_report` | `TRUE` | Generate `report/quality_report.html` and CSV summaries |
+| `resume` | `FALSE` | Skip steps when output files already exist |
+| `samples` | all High+Low | Subset of sample IDs to process |
+
+---
+
+## Usage: legacy pipeline
+
+The legacy workflow starts from **pod5** raw data and uses BLAST throughout.
+
+### Step 1 — Prepare amplicon database
+
+```r
+library(miaoseq)
+
+out_dir    <- "legacy_output"
+genome_fn  <- "/reference/genome.fa"
+primer_list <- system.file("extdata", "amplicon_primers.csv", package = "miaoseq")
+blast_path  <- "/path/to/blast/bin"
+n_core      <- 30
+
+amplicon_fn <- prepAmpliconDB(
+    blast_path  = blast_path,
+    primer_list = primer_list,
+    genome_fn   = genome_fn,
+    out_dir     = out_dir,
+    n_core      = n_core
+)
+```
+
+### Step 2 — Run full pipeline
+
+```r
+in_dir      <- "/data/minion_run/pod5"
+pam_list    <- system.file("extdata", "agr8_pam_list.csv", package = "miaoseq")
+index_list  <- system.file("extdata", "index_list.csv", package = "miaoseq")
+
+miaoEditcall(
+    in_dir       = in_dir,
+    out_dir      = out_dir,
+    dorado_path  = "/path/to/dorado",
+    samtools_path = "/path/to/samtools",
+    blast_path   = blast_path,
+    primer_list  = primer_list,
+    pam_list     = pam_list,
+    index_list   = index_list,
+    genome_fn    = genome_fn,
+    amplicon_fn  = amplicon_fn,
+    size_sel     = c(300, 450),
+    check_window = 10,
+    n_core       = n_core,
+    resume       = FALSE
+)
+```
+
+### Step 3 — Summary statistics
+
+```r
 evalMiao(out_dir = out_dir, output_reads = FALSE)
 ```
 
-> **Typical running time and memory usage:**  
-> On a standard workstation using 30 CPU cores, processing the output read data from a single Oxford Nanopore Flongle cell typically takes about **1 hour**. Actual running time may vary depending on hardware, data size, and parameter settings.  
-> **Memory usage:** In a typical run, miaoseq required approximately **15–20 GB of RAM**. Please ensure your system has sufficient memory available for large datasets.
+---
+
+## Edit calling and visualization
+
+### `editViewer()` — plate heatmaps
+
+Generates per-plate PDF heatmaps from `editcall/editcall_summary.csv`.
+
+```r
+sample_layout <- "sample_layout.csv"   # 5-column plate map (no header)
+
+# Legacy wide-format summary
+editViewer(out_dir, sample_layout)
+
+# Refless long-format summary (auto-detected when cluster_id column present)
+editViewer(out_dir, sample_layout, refless = TRUE)
+
+# Show all clusters per well (primary marked with *)
+editViewer(out_dir, sample_layout,
+           refless = TRUE, cluster_level = TRUE)
+
+# Single PDF for all plates
+editViewer(out_dir, sample_layout, onefile = TRUE)
+```
+
+Genotype color key: `ref` (yellow), out-of-frame edits (blue shades), in-frame edits (green shades).
+
+### Quality report (refless)
+
+When `write_report = TRUE`, `miaoPipeline()` writes:
+
+- `report/quality_report.html` — human-readable run summary
+- `report/run_summary.csv` — total/assigned/unclassified read counts
+- `report/sample_quality.csv` — per-sample cluster and chimera metrics
+- `report/contaminant_clusters.csv` — low-fraction cluster flags
+
+Regenerate manually:
+
+```r
+writeReflessReport(
+    pipeline_results = results,
+    pipeline_out     = out_dir,
+    edit_results     = edit_results   # optional
+)
+```
+
+---
+
+## Output directories
+
+### Refless (`miaoPipeline`)
+
+```
+out_dir/
+├── demultiplex/
+│   ├── demultiplex_assignments.csv
+│   └── per_sample/<sample_id>.fastq
+├── samples/<sample_id>/
+│   ├── cluster/          # cluster_assignments.csv, chimera/ (optional)
+│   ├── consensus/        # per-cluster FASTA + consensus_summary.csv
+│   └── confidence/       # confidence_metrics.csv
+├── report/               # quality_report.html, CSV summaries
+└── miaoPipeline_results.rds
+```
+
+After `doEditCalling()`:
+
+```
+edit_calling/
+├── ref_targets/
+├── editcall/editcall_summary.csv
+└── samples/<sample_id>/
+    ├── align/
+    ├── editcall/
+    ├── primary_cluster.csv
+    └── cluster_scores.csv
+```
+
+### Legacy (`miaoEditcall`)
+
+```
+out_dir/
+├── basecall/
+├── demultiplex/
+├── align/
+├── editcall/
+├── ref/
+└── miao_summary/
+```
+
+---
+
+## Troubleshooting
+
+### External tool not found (refless)
+
+1. Confirm binaries are on `PATH`, or set `MIAOSEQ_MMSEQS_PATH` / `MIAOSEQ_MINIMAP2_PATH`.
+2. Build and export the Apptainer image (see [Apptainer image](#apptainer-image-recommended-for-refless)).
+3. Run the smoke test with `index_list_smoke.csv` and a small synthetic FASTQ before full plates.
+
+### SIF build fails
+
+If `build.sh` reports `mksquashfs` failure, use the sandbox path:
+
+```bash
+export MIAOSEQ_REFLESS_SIF=cursor_dev/apptainer/images/miaoseq-refless.sandbox
+```
+
+### Demultiplexing assigns few reads (refless)
+
+- Increase `end_window` (default 200) if index+primer spans are longer.
+- Lower `t_high` / raise `t_low` thresholds cautiously.
+- Verify index sequences match the actual library design (`evaluateIndexSet()`).
+
+### `editViewer()` errors
+
+- Ensure `editcall/editcall_summary.csv` exists (from `miaoEditcall` or `doEditCalling`).
+- Check that `sample_layout` index IDs match `index_pair_id` in the summary.
+- Install `ggplot2` and `tidyr`.
+
+### BLAST / Dorado errors (legacy)
+
+- Verify `blastn` and `makeblastdb` are in `blast_path`.
+- Confirm pod5 directory path and Dorado model availability.
+
+---
+
+## Performance notes
+
+**Legacy pipeline** (30 cores, single Flongle cell): approximately **1 hour**, **15–20 GB RAM**.
+
+**Refless pipeline**: demultiplexing is parallelized (`n_core` in `demultiplex_params`). Per-sample clustering scales with sample count; `mmseqs2` is fastest for prototyping, `meshclust` for production parity. Chimera detection adds one vsearch pass per sample.
+
+---
+
+## Citation and contact
+
+Author: Tomoyuki Furuta (f.tomoyuki@okayama-u.ac.jp)
+
+For bug reports and feature requests, open an issue on [GitHub](https://github.com/tomoyukif/miaoseq).
