@@ -195,6 +195,16 @@ prepAmpliconDB <- function(blast_path,
     return(out)
 }
 
+
+################################################################################
+# Utility
+################################################################################
+#' @export
+makeMMI <- function(genome_fn, mmi_fn, minimap2_path){
+    system2(command = minimap2_path,
+            args = paste("-x map-ont -d", mmi_fn, genome_fn))
+}
+
 ################################################################################
 # Main pipeline wrapper
 ################################################################################
@@ -346,7 +356,6 @@ miaoEditcall <- function(in_dir,
     } else {
         align_out <- doAlign(blast_path = blast_path,
                              basecall_fn = basecall_fn,
-                             demult_out = demult_out,
                              amplicon_fn = amplicon_fn,
                              align_dir = align_dir,
                              primer_list = primer_list,
@@ -685,7 +694,6 @@ doDemultiplex <- function(blast_path, basecall_fn, demult_dir, index_list){
 #'
 doAlign <- function(blast_path,
                     basecall_fn,
-                    demult_out,
                     amplicon_fn,
                     align_dir,
                     primer_list,
@@ -1247,7 +1255,7 @@ evalMiao <- function(out_dir, output_reads){
 #' @param onefile If TRUE, draw plots in one PDF file, otherwise separate PDF files.
 #' @return Invisibly, a character vector of generated PDF file paths.
 #' @export
-editViewer <- function(out_dir, sample_list, onefile = FALSE){
+editViewer <- function(out_dir, sample_list, onefile = FALSE, fill_plate = TRUE){
     if(!dir.exists(out_dir)){
         stop("out_dir does not exist: ", out_dir)
     }
@@ -1332,6 +1340,29 @@ editViewer <- function(out_dir, sample_list, onefile = FALSE){
     long_edit_result$edit_eval <- factor(long_edit_result$edit_eval, eval_levels)
     n_gene <- length(unique(long_edit_result$gene))
 
+    if(fill_plate){
+        wells <- paste(long_edit_result$plate,
+                       long_edit_result$row,
+                       long_edit_result$col, sep = "_")
+        all_wells <- expand.grid(plate = unique(long_edit_result$plate),
+                                 row = LETTERS[1:8],
+                                 col = as.character(1:12))
+        all_wells_id <- apply(all_wells, 1, paste, collapse = "_")
+        missing_wells <- !all_wells_id %in% wells
+        add_result <- long_edit_result[rep(1, sum(missing_wells)), ]
+        add_result$name <- add_result$total_reads_display <- add_result$edit_eval <- add_result$uniq <- NA
+        add_result$plate <- all_wells$plate[missing_wells]
+        add_result$row <- all_wells$row[missing_wells]
+        add_result$col <- all_wells$col[missing_wells]
+        add_result <- lapply(unique(long_edit_result$gene), function(x){
+            add_result$gene <- x
+            return(add_result)
+        })
+        add_result <- do.call(rbind, add_result)
+        long_edit_result <- rbind(long_edit_result, add_result)
+    }
+
+    long_edit_result$col <- factor(long_edit_result$col, 1:12)
     out_files <- character(0)
     if(onefile){
         pdf_fn <- file.path(plot_dir, "edit_viewer_plate.pdf")
@@ -1343,7 +1374,7 @@ editViewer <- function(out_dir, sample_list, onefile = FALSE){
             ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 2, label = name), vjust = 1, hjust = 0.5, size = 4) +
             ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1.4, label = uniq), vjust = 1, hjust = 0.5, size = 3) +
             ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 0.9, label = total_reads_display), vjust = 1, hjust = 0.5, size = 3) +
-            ggplot2::facet_grid(rows = ggplot2::vars(row), cols = ggplot2::vars(col), switch = "y") +
+            ggplot2::facet_grid(rows = ggplot2::vars(row), cols = ggplot2::vars(col), switch = "y", drop = FALSE) +
             ggplot2::scale_fill_manual(values = c("yellow", "darkblue", "blue",
                                                   "lightblue", "darkgreen", "green"),
                                        breaks = eval_levels,
