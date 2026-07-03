@@ -1253,9 +1253,21 @@ evalMiao <- function(out_dir, output_reads){
 #'   The values are used to annotate plots (sample name) and to facet by plate
 #'   and well coordinates (row, col).
 #' @param onefile If TRUE, draw plots in one PDF file, otherwise separate PDF files.
+#' @param fill_plate If TRUE, add empty wells so each plate shows the full 8x12 grid.
+#' @param refless If TRUE (or when `editcall_summary.csv` contains `cluster_id`), treat
+#'   the summary as refless long-format output from `doEditCalling()`.
+#' @param cluster_level If TRUE and refless data is used, draw one tile per cluster per
+#'   target gene (primary clusters marked with `*`).
+#' @param primary_only If TRUE and `cluster_level` is FALSE, show only primary clusters.
 #' @return Invisibly, a character vector of generated PDF file paths.
 #' @export
-editViewer <- function(out_dir, sample_list, onefile = FALSE, fill_plate = TRUE){
+editViewer <- function(out_dir,
+                       sample_list,
+                       onefile = FALSE,
+                       fill_plate = TRUE,
+                       refless = FALSE,
+                       cluster_level = FALSE,
+                       primary_only = TRUE){
     if(!dir.exists(out_dir)){
         stop("out_dir does not exist: ", out_dir)
     }
@@ -1268,75 +1280,132 @@ editViewer <- function(out_dir, sample_list, onefile = FALSE, fill_plate = TRUE)
         stop("Cannot find editcall summary: ", csv_fn)
     }
     edit_result <- read.csv(csv_fn)
+    is_refless <- refless || "cluster_id" %in% names(edit_result)
 
-    edit_result <- subset(edit_result,
-                          select = -data_type,
-                          subset = data_type == "genotype")
-
-    sample_list <- read.csv(sample_list, header = FALSE)
-    hit <- match(edit_result$index_pair_id, sample_list$V1)
-    edit_result$name <- sample_list$V2[hit]
-    edit_result$plate <- sample_list$V3[hit]
-    edit_result$row <- sample_list$V4[hit]
-    edit_result$col <- sample_list$V5[hit]
-
-    # Add total reads information if available
-    if("total_reads" %in% names(edit_result)){
-        edit_result$total_reads_display <- paste0("n=", edit_result$total_reads)
-    } else {
-        edit_result$total_reads_display <- ""
-    }
-    edit_result_pat <- apply(subset(edit_result,
-                                    select = -c(index_pair_id, name:col)),
-                             1,
-                             paste,
-                             collapse = "_")
-    dup_list <- tapply(seq_along(edit_result_pat), sub("_.+", "", edit_result$name), function(i){
-        dup <- !duplicated(edit_result_pat[i])
-        out <- data.frame(i = i, dup = dup)
-        return(out)
-    })
-    dup_list <- do.call("rbind", dup_list)
-    dup_list <- dup_list[order(dup_list$i), ]
-    edit_result$uniq <- "Dup"
-    edit_result$uniq[dup_list$dup] <- "Uniq"
-    edit_result$uniq[edit_result$name == "" | is.na(edit_result$name)] <- ""
-    long_edit_result <- tidyr::pivot_longer(edit_result,
-                                            cols = -c(index_pair_id, sample_name:uniq),
-                                            names_to = "gene",
-                                            values_to = "edit")
-
-    long_edit_result$edit_eval <- sapply(long_edit_result$edit, function(x){
-        x <- unlist(strsplit(x, "/"))
-        if(all(is.na(x))){
-            return(NA)
-        }
-        x1 <- gsub("[0-9]", "", x)
-        x2 <- as.numeric(gsub("[a-zA-Z]", "", x))
-        is_ref <- x1 %in% "ref"
-        is_inframe <- x2 %% 3 %in% 0
-        if(all(is_ref)){
-            return("ref")
-        } else if(all(!is_ref)){
-            if(all(!is_inframe)){
-                return("alt")
-            } else if(all(is_inframe)){
-                return("alt_inframe_homo")
-            } else {
-                return("alt_inframe_het")
-            }
-        } else {
-            if(all(!is_inframe)){
-                return("het")
-            } else {
-                return("het_inframe")
-            }
-        }
-    })
-
+    sample_list_df <- read.csv(sample_list, header = FALSE)
     eval_levels <- c("ref",
                      "alt", "alt_inframe_het", "alt_inframe_homo",
                      "het", "het_inframe")
+
+    if(is_refless){
+        if(primary_only && !cluster_level && "is_primary" %in% names(edit_result)){
+            edit_result <- edit_result[edit_result$is_primary %in% TRUE, , drop = FALSE]
+        }
+        edit_result <- subset(edit_result, data_type == "genotype")
+        id_col <- if("index_pair_id" %in% names(edit_result)) "index_pair_id" else "sample_id"
+        hit <- match(edit_result[[id_col]], sample_list_df$V1)
+        edit_result$name <- sample_list_df$V2[hit]
+        edit_result$plate <- sample_list_df$V3[hit]
+        edit_result$row <- sample_list_df$V4[hit]
+        edit_result$col <- sample_list_df$V5[hit]
+
+        long_edit_result <- edit_result
+        long_edit_result$gene <- long_edit_result$target_gene
+        long_edit_result$edit <- long_edit_result$genotype
+        long_edit_result$edit_eval <- vapply(
+            long_edit_result$genotype,
+            .refless_genotype_to_eval,
+            character(1)
+        )
+        if("cluster_fraction" %in% names(long_edit_result)){
+            long_edit_result$total_reads_display <- ifelse(
+                is.na(long_edit_result$cluster_fraction),
+                "",
+                sprintf("%.0f%%", 100 * long_edit_result$cluster_fraction)
+            )
+        } else {
+            long_edit_result$total_reads_display <- ""
+        }
+        long_edit_result$uniq <- ""
+
+        if(cluster_level && "cluster_id" %in% names(long_edit_result)){
+            long_edit_result <- long_edit_result[order(
+                long_edit_result[[id_col]],
+                long_edit_result$gene,
+                -as.integer(long_edit_result$is_primary %in% TRUE),
+                -long_edit_result$cluster_fraction
+            ), ]
+            long_edit_result$cluster_rank <- ave(
+                seq_len(nrow(long_edit_result)),
+                long_edit_result[[id_col]],
+                long_edit_result$gene,
+                FUN = seq_along
+            )
+            long_edit_result$cluster_label <- ifelse(
+                long_edit_result$is_primary %in% TRUE,
+                sprintf("C%s*", long_edit_result$cluster_id),
+                sprintf("C%s", long_edit_result$cluster_id)
+            )
+        } else {
+            long_edit_result$cluster_rank <- 1L
+            long_edit_result$cluster_label <- ""
+        }
+    } else {
+        edit_result <- subset(edit_result,
+                              select = -data_type,
+                              subset = data_type == "genotype")
+
+        hit <- match(edit_result$index_pair_id, sample_list_df$V1)
+        edit_result$name <- sample_list_df$V2[hit]
+        edit_result$plate <- sample_list_df$V3[hit]
+        edit_result$row <- sample_list_df$V4[hit]
+        edit_result$col <- sample_list_df$V5[hit]
+
+        if("total_reads" %in% names(edit_result)){
+            edit_result$total_reads_display <- paste0("n=", edit_result$total_reads)
+        } else {
+            edit_result$total_reads_display <- ""
+        }
+        edit_result_pat <- apply(subset(edit_result,
+                                        select = -c(index_pair_id, name:col)),
+                                 1,
+                                 paste,
+                                 collapse = "_")
+        dup_list <- tapply(seq_along(edit_result_pat), sub("_.+", "", edit_result$name), function(i){
+            dup <- !duplicated(edit_result_pat[i])
+            data.frame(i = i, dup = dup)
+        })
+        dup_list <- do.call("rbind", dup_list)
+        dup_list <- dup_list[order(dup_list$i), ]
+        edit_result$uniq <- "Dup"
+        edit_result$uniq[dup_list$dup] <- "Uniq"
+        edit_result$uniq[edit_result$name == "" | is.na(edit_result$name)] <- ""
+        long_edit_result <- tidyr::pivot_longer(edit_result,
+                                                cols = -c(index_pair_id, sample_name:uniq),
+                                                names_to = "gene",
+                                                values_to = "edit")
+
+        long_edit_result$edit_eval <- sapply(long_edit_result$edit, function(x){
+            x <- unlist(strsplit(x, "/"))
+            if(all(is.na(x))){
+                return(NA)
+            }
+            x1 <- gsub("[0-9]", "", x)
+            x2 <- as.numeric(gsub("[a-zA-Z]", "", x))
+            is_ref <- x1 %in% "ref"
+            is_inframe <- x2 %% 3 %in% 0
+            if(all(is_ref)){
+                return("ref")
+            } else if(all(!is_ref)){
+                if(all(!is_inframe)){
+                    return("alt")
+                } else if(all(is_inframe)){
+                    return("alt_inframe_homo")
+                } else {
+                    return("alt_inframe_het")
+                }
+            } else {
+                if(all(!is_inframe)){
+                    return("het")
+                } else {
+                    return("het_inframe")
+                }
+            }
+        })
+        long_edit_result$cluster_rank <- 1L
+        long_edit_result$cluster_label <- ""
+    }
+
     long_edit_result$edit_eval <- factor(long_edit_result$edit_eval, eval_levels)
     n_gene <- length(unique(long_edit_result$gene))
 
@@ -1351,6 +1420,8 @@ editViewer <- function(out_dir, sample_list, onefile = FALSE, fill_plate = TRUE)
         missing_wells <- !all_wells_id %in% wells
         add_result <- long_edit_result[rep(1, sum(missing_wells)), ]
         add_result$name <- add_result$total_reads_display <- add_result$edit_eval <- add_result$uniq <- NA
+        add_result$cluster_rank <- 1L
+        add_result$cluster_label <- ""
         add_result$plate <- all_wells$plate[missing_wells]
         add_result$row <- all_wells$row[missing_wells]
         add_result$col <- all_wells$col[missing_wells]
@@ -1369,16 +1440,34 @@ editViewer <- function(out_dir, sample_list, onefile = FALSE, fill_plate = TRUE)
         pdf(pdf_fn, width = 11.69, height = 8.27)
     }
     for(i in unique(long_edit_result$plate)){
-        p <- ggplot2::ggplot(subset(long_edit_result, plate == i)) +
-            ggplot2::geom_tile(ggplot2::aes(x = gene, y = 0, fill = edit_eval)) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 2, label = name), vjust = 1, hjust = 0.5, size = 4) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1.4, label = uniq), vjust = 1, hjust = 0.5, size = 3) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 0.9, label = total_reads_display), vjust = 1, hjust = 0.5, size = 3) +
+        plate_df <- subset(long_edit_result, plate == i)
+        if(is_refless && cluster_level){
+            p <- ggplot2::ggplot(plate_df) +
+                ggplot2::geom_tile(ggplot2::aes(x = gene, y = -cluster_rank, fill = edit_eval),
+                                   height = 0.85) +
+                ggplot2::geom_text(ggplot2::aes(x = gene, y = -cluster_rank, label = cluster_label),
+                                   size = 2.2, vjust = 0.5) +
+                ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 2, label = name),
+                                   vjust = 1, hjust = 0.5, size = 4) +
+                ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 0.9, label = total_reads_display),
+                                   vjust = 1, hjust = 0.5, size = 3)
+        } else {
+            p <- ggplot2::ggplot(plate_df) +
+                ggplot2::geom_tile(ggplot2::aes(x = gene, y = 0, fill = edit_eval)) +
+                ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 2, label = name),
+                                   vjust = 1, hjust = 0.5, size = 4) +
+                ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1.4, label = uniq),
+                                   vjust = 1, hjust = 0.5, size = 3) +
+                ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 0.9, label = total_reads_display),
+                                   vjust = 1, hjust = 0.5, size = 3)
+        }
+        p <- p +
             ggplot2::facet_grid(rows = ggplot2::vars(row), cols = ggplot2::vars(col), switch = "y", drop = FALSE) +
             ggplot2::scale_fill_manual(values = c("yellow", "darkblue", "blue",
                                                   "lightblue", "darkgreen", "green"),
                                        breaks = eval_levels,
-                                       name = NULL) +
+                                       name = NULL,
+                                       na.value = "grey90") +
             ggplot2::labs(title = paste0("Plate ", i)) +
             ggplot2::theme(axis.title = ggplot2::element_blank(),
                            axis.text.y = ggplot2::element_blank(),

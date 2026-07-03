@@ -10,6 +10,8 @@ doBasecall(
   size_sel = c(0, Inf),
   dorado_path,
   samtools_path,
+  mmi_fn = NULL,
+  bed_fn = NULL,
   n_core
 )
 }

@@ -9,7 +9,6 @@ It processes the basecalled reads, performs the alignment, and extracts relevant
 doAlign(
   blast_path,
   basecall_fn,
-  demult_out,
   amplicon_fn,
   align_dir,
   primer_list,
@@ -23,8 +22,6 @@ doAlign(
 
 \item{basecall_fn}{A character vector containing paths to the FASTA files of basecalled reads.}
 
-\item{demult_out}{A data frame summarizing the demultiplexing results.}
-
 \item{amplicon_fn}{Path to the amplicon database FASTA file.}
 
 \item{align_dir}{Path to the output directory where alignment results will be saved.}
@@ -36,6 +33,8 @@ doAlign(
 \item{genome_fn}{Path to the reference genome sequence in FASTA format.}
 
 \item{check_window}{An integer specifying the window size (in bp) around the expected cut site to search for edits.}
+
+\item{demult_out}{A data frame summarizing the demultiplexing results.}
 }
 \value{
 A data frame summarizing the alignment results.

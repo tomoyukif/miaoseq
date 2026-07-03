@@ -14,9 +14,12 @@ miaoEditcall(
   pam_list,
   index_list,
   genome_fn,
+  mmi_fn = NULL,
+  bed_fn = NULL,
   amplicon_fn,
   size_sel,
   check_window = 10,
+  strict = FALSE,
   n_core = 1,
   resume = FALSE,
   sample_list = NULL

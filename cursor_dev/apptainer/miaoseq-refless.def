@@ -1,0 +1,32 @@
+Bootstrap: docker
+From: condaforge/mambaforge:latest
+
+%labels
+    Author Tomoyuki Furuta
+    Version miaoseq-refless-0.1
+
+%environment
+    export PATH=/opt/conda/bin:/opt/scripts:$PATH
+    export LC_ALL=C
+
+%post
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    mamba create -y -p /opt/miaoseq-env -c conda-forge -c bioconda \
+        python=3.11 \
+        mmseqs2 \
+        minimap2 \
+        vsearch \
+        samtools \
+        umap-learn \
+        hdbscan \
+        scikit-learn \
+        numpy \
+        pip
+    ln -sf /opt/miaoseq-env/bin/* /usr/local/bin/
+    mamba clean -a -y
+
+%files
+    scripts/umap_kmer_cluster.py /opt/scripts/umap_kmer_cluster.py
+
+%runscript
+    exec "$@"

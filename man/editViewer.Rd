@@ -4,7 +4,15 @@
 \alias{editViewer}
 \title{Visualize edit-calling results per plate as PDF heatmaps}
 \usage{
-editViewer(out_dir, sample_list, onefile = FALSE)
+editViewer(
+  out_dir,
+  sample_list,
+  onefile = FALSE,
+  fill_plate = TRUE,
+  refless = FALSE,
+  cluster_level = FALSE,
+  primary_only = TRUE
+)
 }
 \arguments{
 \item{out_dir}{Output directory of a completed run. Must contain
@@ -26,6 +34,16 @@ The values are used to annotate plots (sample name) and to facet by plate
 and well coordinates (row, col).}
 
 \item{onefile}{If TRUE, draw plots in one PDF file, otherwise separate PDF files.}
+
+\item{fill_plate}{If TRUE, add empty wells so each plate shows the full 8x12 grid.}
+
+\item{refless}{If TRUE (or when \code{editcall_summary.csv} contains \code{cluster_id}), treat
+the summary as refless long-format output from \code{doEditCalling()}.}
+
+\item{cluster_level}{If TRUE and refless data is used, draw one tile per cluster per
+target gene (primary clusters marked with \code{*}).}
+
+\item{primary_only}{If TRUE and \code{cluster_level} is FALSE, show only primary clusters.}
 }
 \value{
 Invisibly, a character vector of generated PDF file paths.

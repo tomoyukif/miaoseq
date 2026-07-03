@@ -6,7 +6,13 @@
 This function evaluates the alignments of reads to amplicon sequences and performs edit-calling.
 It summarizes the edit-calling results and saves them to output files.}
 \usage{
-doEditcall(demult_out, align_out, editcall_dir, sample_list = NULL)
+doEditcall(
+  demult_out,
+  align_out,
+  editcall_dir,
+  sample_list = NULL,
+  strict = FALSE
+)
 }
 \arguments{
 \item{demult_out}{A data frame summarizing the demultiplexing results.}
