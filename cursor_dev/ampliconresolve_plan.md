@@ -1,12 +1,64 @@
 # doAmpliconResolve 実装計画（ref-aware）
 
 作成日: 2026-07-09  
+改訂: 2026-07-09 — **Phase C0 実装・テスト完了**を反映  
 関連:
 - [cursor_dev/pipeline_revise.md](pipeline_revise.md) — パイプライン全体・§6 Step 2
 - [cursor_dev/demux_revise.md](demux_revise.md) — Step 1 入出力契約
 - [cursor_dev/code_reorganize_plan.md](code_reorganize_plan.md) — 旧 `doAlign` 配置の参考
 
 対象: 新ファイル `R/amplicon_resolve.R`（`export(doAmpliconResolve)`）
+
+---
+
+## 0. 実装進捗（2026-07-09 時点）
+
+| フェーズ | 状態 | 備考 |
+|----------|------|------|
+| **Phase C0** | **完了（部分）** | 配線・I/O・完全一致クラスタ。gene 割当は未実装 |
+| Phase C1 | 未着手 | ref-aware gene 割当 + 実用クラスタ/コンセンサス |
+| Phase C2 | 未着手 | `doAlign` 置換・ドキュメント |
+| Phase C3 | 未着手 | 高度化（任意） |
+
+**コミット**: `fa775d85` — `R/amplicon_resolve.R`, `NAMESPACE`, 本計画書
+
+### Phase C0 で実装済み
+
+| 項目 | 状態 |
+|------|------|
+| `doAmpliconResolve()` export | ✓ |
+| サンプル I/O（`by_sample` 優先 + 1 パス FASTQ バケット化） | ✓ |
+| 完全一致クラスタ（`method = "exact"`） | ✓ |
+| consensus = クラスタ代表（最頻＝完全一致） | ✓ |
+| 出力: `consensus.fasta`, `clusters.fasta`, `cluster_counts.tsv`, `stats.tsv`, `summary_by_sample.tsv` | ✓ |
+| `samples` 部分実行、`overwrite` ガード | ✓ |
+| `stats.tsv` の `skip_reason`（`low_sample_reads` / `no_clusters` / 空） | ✓ |
+| `gene_id = "unknown"` 固定（primer 無し時のフォールバック相当） | ✓ |
+
+### Phase C0 で未実装（C1 へ）
+
+| 項目 | 状態 |
+|------|------|
+| `primer_list` / `amplicon_fn` 引数 | 未追加 |
+| primer edlib による gene 割当 | 未実装 |
+| greedy / 距離ベースクラスタ | 未実装 |
+| `gene_assignments.tsv` | 未出力 |
+| `man/doAmpliconResolve.Rd` | 未生成（roxygen は `R/amplicon_resolve.R` に記述済み） |
+| サンプル並列（`n_core`） | 予約のみ |
+
+### Phase C0 テスト結果（20k データ）
+
+入力: `demultiplex_20k/assignments.tsv` + `basecall_filt_20k.fq`（10,473 reads / 363 samples）
+
+| 指標 | 結果 |
+|------|------|
+| リード抽出 | 10,473 / 10,473（assignments と一致） |
+| 全サンプル処理時間（1 パス FASTQ） | **~2.3 秒**（修正前 ~126 秒） |
+| `min_cluster_reads = 5`（デフォルト） | クラスタ **0 件**（全サンプルで完全一致重複なし） |
+| `min_cluster_reads = 1` | 正常に `consensus.fasta` / `cluster_counts.tsv` 生成 |
+| `skip_reason` 内訳 | `low_sample_reads` 105、`no_clusters` 258 |
+
+**所見**: ONT 生リード＋完全一致クラスタでは `min_cluster_reads = 5` では実質空出力になる。配線確認には `min_cluster_reads = 1` を使うか、**C1 の距離ベースクラスタが必須**。
 
 ---
 
@@ -73,25 +125,32 @@ amplicon/{sample_id}/consensus.fasta + cluster_counts.tsv + ...
 
 ### 4.1 公開シグネチャ
 
+**現行（Phase C0 実装）**:
+
 ```r
 doAmpliconResolve <- function(
-  assignments,                 # path or data.frame (read_id, sample_id, ...)
-  out_dir,                     # 通常 {run}/amplicon
-  fastq = NULL,                # 元 FASTQ（sample_fastq_dir が無いとき必須）
-  sample_fastq_dir = NULL,     # demultiplex/by_sample
-  primer_list = NULL,          # CSV: primer_id, seq（_F/_R）。マルチ gene 時は推奨/必須相当
-  amplicon_fn = NULL,          # prepAmpliconDB の amplicon.fa（任意）
+  assignments,
+  out_dir,
+  fastq = NULL,
+  sample_fastq_dir = NULL,
   method = c("both", "cluster", "consensus"),
-  min_reads = 5,               # sample×gene に使う最小リード数
-  min_cluster_reads = 5,       # クラスタを出力に残す最小 read 数
-  max_clusters = 20,           # サンプル×gene あたり上位クラスタ数の上限
-  max_primer_edit = 3,         # primer edlib 許容編集距離
-  end_window = 80,             # リード両端での primer 探索窓
-  length_tolerance = 0.25,     # expected_len ±25%（amplicon_fn がある場合）
-  samples = NULL,              # 処理する sample_id 部分集合（NULL=全部）
-  n_core = 1,
+  min_reads = 5L,
+  min_cluster_reads = 5L,
+  samples = NULL,
+  n_core = 1L,          # 予約（未使用）
   overwrite = FALSE
 )
+```
+
+**目標（Phase C1 以降で追加予定）**:
+
+```r
+  primer_list = NULL,          # CSV: primer_id, seq（_F/_R）
+  amplicon_fn = NULL,          # prepAmpliconDB の amplicon.fa
+  max_clusters = 20,
+  max_primer_edit = 3,
+  end_window = 80,
+  length_tolerance = 0.25,
 ```
 
 ### 4.2 引数ルール
@@ -109,16 +168,17 @@ doAmpliconResolve <- function(
 
 ### 4.3 戻り値
 
+**現行（Phase C0）**:
+
 ```r
-AmpliconResolveResult <- list(
-  samples = character(),          # 処理した sample_id
+list(
+  samples = character(),   # 処理対象 sample_id（assignments から抽出）
   out_dir = character(1),
-  table   = data.frame(),         # 全 sample の cluster_counts 縦結合
-  gene_assignments = data.frame() # 任意: read→gene 診断表のパス or 要約
+  table   = data.frame()   # 全 sample の cluster_counts 縦結合（seq 列含む）
 )
 ```
 
-`pipeline_revise.md` §11 の契約と一致させる。ファイルパス中心でもよいが、少なくとも `table` はメモリ上で返す。
+**目標（C1 以降）**: `gene_assignments` を追加。`pipeline_revise.md` §11 と整合。
 
 ---
 
@@ -171,9 +231,13 @@ n_reads_assigned_gene
 n_reads_unassigned_gene
 n_genes_detected
 n_clusters_total
-n_skipped_low_count     # min_reads 未満で落とした sample×gene
-elapsed_sec
+n_skipped_low_count     # min_reads 未満のとき 1、それ以外 0
+skip_reason             # low_sample_reads | no_clusters | （空=成功）
 ```
+
+`summary_by_sample.tsv` にも `skip_reason` を出力（C0 実装済み）。
+
+`elapsed_sec` は C1 以降で追加予定。
 
 ### 5.5 `consensus.fasta` / `clusters.fasta` ヘッダ
 
@@ -206,14 +270,20 @@ flowchart TD
 
 ### 6.1 サンプル単位リード取得
 
-優先順:
+優先順（**C0 実装済み** — `.resolve_all_sample_sequences()`）:
 
-1. `file.path(sample_fastq_dir, paste0(sample_id, ".fq.gz"))`（または `.fq`）
-2. 無ければ `fastq` をストリームし、`assignments$read_id` で当該サンプルのみ抽出  
-   - 実装: 既存 `splitDemultiplexReads()` を **サンプル部分集合**で呼ぶ、または内部ストリーミング抽出
-3. `n_reads_in < min_reads` なら当該サンプルは `stats` だけ書いてスキップ
+1. `sample_fastq_dir/{sample_id}.fq.gz`（または `.fq`）があれば個別読込
+2. 無いサンプルは **1 回の FASTQ パス**で `read_id → sample_id` バケット化（`.bucket_sequences_from_fastq()`）
+3. `n_reads_in < min_reads` なら `stats` のみ書き `skip_reason = "low_sample_reads"` でスキップ
 
-メモリ注意: 全サンプルを同時にメモリに載せない。`n_core > 1` でも **サンプル並列**（遺伝子並列は後で検討）。
+性能（20k 実測）:
+
+| 経路 | 363 サンプル |
+|------|-------------|
+| assignments + fastq（1 パス） | ~2.3 秒 |
+| by_sample 個別読込 | ~0.04 秒 / 2 サンプル |
+
+メモリ: C0 では全サンプル分の配列を一度にメモリ保持（10k reads 規模では問題なし）。大規模時はサンプル逐次化を検討。
 
 ### 6.2 遺伝子割当（ref-aware 本線）
 
@@ -337,19 +407,28 @@ demux の end-window 思想を再利用:
 
 新規ファイル: `R/amplicon_resolve.R`
 
+**実装済み（C0）**:
+
 ```
 doAmpliconResolve()                 # export
+.make_amplicon_stats()              # stats.tsv 生成
+.resolve_all_sample_sequences()     # by_sample 優先 + 1 パス FASTQ
+.read_sample_fastq_if_present()
+.bucket_sequences_from_fastq()
+.read_all_sequences_from_fastq()
+```
 
+`.as_assignment_df()` は `R/demultiplex.R` の内部関数を再利用。
+
+**C1 で追加予定**:
+
+```
 .parse_primer_pairs()               # primer_list → gene_id, F, R
-.load_assignments()                 # path / data.frame
-.resolve_sample_fastq()             # by_sample or extract
 .assign_genes_by_primers()          # edlib primer → gene_id + strand
 .assign_genes_by_amplicon_ref()     # フォールバック
 .filter_by_length()
 .cluster_reads()                    # backend 切替
 .consensus_from_cluster()
-.write_sample_amplicon_outputs()
-.summarize_amplicon_run()
 ```
 
 C++（任意だが推奨）:
@@ -405,30 +484,37 @@ cursor_dev/tool_test/.../run_amplicon_resolve.R
 | edlib 呼び出し | primer 数 × 2（F/R）× 2（RC）× 両端。gene 数が ~10 なら demux より軽い |
 | I/O | 診断 `reads_by_gene` はデフォルト OFF |
 
-成功基準の時間目安（目安・後で計測で更新）: 20k reads・〜8 genes・demux 済みで **数分以内**（n_core=8）。
+**実測（C0, 20k reads, 363 samples, 1 パス FASTQ）**: ~2.3 秒（gene 割当・クラスタなしの配線のみ）。gene 割当追加後も数分以内が目標。
 
 ---
 
 ## 10. 実装フェーズ
 
-### Phase C0 — 配線と契約（最短で動く）
+### Phase C0 — 配線と契約（最短で動く） ✅ 完了（2026-07-09）
 
-- [ ] `R/amplicon_resolve.R` スケルトン + NAMESPACE export
-- [ ] サンプル FASTQ 解決（by_sample / assignments+fastq）
-- [ ] primer edlib gene 割当（R プロトタイプでも可。遅ければ C++）
-- [ ] Phase C0 クラスタ = 同一配列集計、consensus = 最頻
-- [ ] 出力ファイル契約どおりに書く
-- [ ] 20k demux 済みデータで 1 サンプル〜数サンプル smoke test
+- [x] `R/amplicon_resolve.R` スケルトン + NAMESPACE export
+- [x] サンプル FASTQ 解決（by_sample 優先 + 1 パス FASTQ バケット化）
+- [x] Phase C0 クラスタ = 同一配列集計（`method = "exact"`）、consensus = 代表配列
+- [x] 出力ファイル契約（`skip_reason` 含む `stats.tsv`）
+- [x] 20k demux 済みデータで全サンプル + 部分サンプル smoke test
+- [ ] primer edlib gene 割当 → **C1 に繰り下げ**
 
-**完了条件**: `amplicon/{sample}/cluster_counts.tsv` と `consensus.fasta` が読め、gene_id が primer stem と一致する。
+**完了条件（配線）**: 達成。`min_cluster_reads = 1` で `cluster_counts.tsv` / `consensus.fasta` 生成を確認。
 
-### Phase C1 — 実用クラスタ/コンセンサス
+**未達（意図的）**: gene_id が primer stem と一致する検証は C1 で実施。
 
-- [ ] greedy / 内部距離クラスタ
-- [ ] 簡易 MSA 多数決 or spoa
+### Phase C1 — ref-aware gene 割当 + 実用クラスタ/コンセンサス ← **次のステップ**
+
+- [ ] C++ 汎用 edlib API 切り出し（`src/edlib_utils.cpp`）
+- [ ] `primer_list` 引数 + `.parse_primer_pairs()` + `.assign_genes_by_primers()`
+- [ ] sample × gene バケツ化（`unknown` フォールバック維持）
+- [ ] greedy / 内部距離クラスタ（`max_cluster_edit`）
+- [ ] 簡易 MSA 多数決 or spoa コンセンサス
 - [ ] `amplicon_fn` 長さフィルタ・フォールバック割当
-- [ ] `summary_by_sample.tsv` / `gene_assignments.tsv`
-- [ ] `min_reads` / `max_clusters` の既定値チューニング
+- [ ] `gene_assignments.tsv` 出力
+- [ ] API 引数拡張（`primer_list`, `amplicon_fn`, `max_clusters`, `max_primer_edit`, `end_window`, `length_tolerance`）
+- [ ] `min_reads` / `max_clusters` / `min_cluster_reads` の既定値チューニング
+- [ ] `man/doAmpliconResolve.Rd` 生成
 
 ### Phase C2 — 置換と整理
 
@@ -460,43 +546,45 @@ cursor_dev/tool_test/.../run_amplicon_resolve.R
 
 ### 11.2 統合（実データ）
 
-入力:
+**C0 実施済み**（`demultiplex_20k` + `basecall_filt_20k.fq`）:
 
-- `cursor_dev/tool_test/miao20250812/basecall_filt_20k.fq`
-- 既存 `demultiplex_20k/assignments.tsv`（または再実行）
-- `inst/extdata/amplicon_primers.csv`
-- （任意）既存 `ref/amplicon.fa`
+| 確認項目 | 結果 |
+|----------|------|
+| リード抽出数 = assignments 数 | ✓ |
+| `min_reads` 未満サンプルのスキップ | ✓（105 サンプル） |
+| `overwrite` ガード | ✓ |
+| `by_sample` 経路 | ✓ |
+| 出力スキーマ・FASTA ヘッダ | ✓ |
+| `min_cluster_reads=5` でクラスタ生成 | ✗（ONT 完全一致重複なし → 想定内） |
 
-確認:
+**C1 で追加確認**:
 
 1. サンプルあたり検出 gene 数が実験デザインとおおむね一致
-2. 旧 `doAlign` の `target_gene` 分布と粗く相関（完全一致は不要）
-3. `min_reads` 未満 gene が落ち、stats に残る
-4. 再実行で上書き制御（`overwrite`）
+2. 旧 `doAlign` の `target_gene` 分布と粗く相関
+3. 距離ベースクラスタで `min_cluster_reads=5` が実用的に機能
 
 ### 11.3 回帰用成果物
 
 ```
-cursor_dev/tool_test/miao20250812/amplicon_20k/
-  summary_by_sample.tsv
-  {sample}/cluster_counts.tsv
-  run_amplicon_resolve.R
-  amplicon_test_results.md   # 人手メモ
+cursor_dev/tool_test/miao20250812/amplicon_20k_c0_fixed/   # C0 全サンプル出力（クラスタ 0）
+cursor_dev/tool_test/miao20250812/amplicon_20k_c0_fixed_mc1/  # min_cluster_reads=1
 ```
+
+`run_amplicon_resolve.R` / `amplicon_test_results.md` は C1 着手時に整備予定。
 
 ---
 
 ## 12. パッケージ影響
 
-| ファイル | 変更 |
+| ファイル | 状態 |
 |----------|------|
-| `R/amplicon_resolve.R` | **新規** |
-| `NAMESPACE` | `export(doAmpliconResolve)` |
-| `man/doAmpliconResolve.Rd` | roxygen 生成 |
-| `src/*` | 任意: 汎用 edlib API 切り出し |
-| `R/amplicon_assign.R` | 当面維持、後で削除 |
-| `DESCRIPTION` | 新規 Imports は最小限（初期は追加しない） |
-| `pipeline_revise.md` | Phase C チェック更新（実装時） |
+| `R/amplicon_resolve.R` | **追加済み**（C0） |
+| `NAMESPACE` | `export(doAmpliconResolve)` **追加済み** |
+| `man/doAmpliconResolve.Rd` | 未生成（C1 で `devtools::document()`） |
+| `src/*` | C1: 汎用 edlib API 切り出し予定 |
+| `R/amplicon_assign.R` | 当面維持、C2 で deprecated |
+| `DESCRIPTION` | 変更なし |
+| `pipeline_revise.md` | Phase C チェック更新は C1 完了時 |
 
 SystemRequirements に vsearch 等を書くのは `cluster_backend` 導入時のみ。
 
@@ -537,15 +625,27 @@ SystemRequirements に vsearch 等を書くのは `cluster_backend` 導入時の
 
 ---
 
-## 15. 実装着手時の作業順序（チェックリスト）
+## 15. 次のステップ（Phase C1 着手順）
 
-1. 入出力スケルトン（空の `stats` / `cluster_counts` でも可）
-2. サンプル FASTQ 解決
-3. primer パース + 合成リードで gene 割当単体テスト
-4. Phase C0（同一配列集計）で end-to-end
-5. 実 20k で gene 分布を確認し、閾値を触る
-6. Phase C1 クラスタ/コンセンサス置換
-7. ドキュメント（Rd / README 例）と `pipeline_revise.md` Phase C 更新
+C0 で配線は通った。**実用化には C1 が必須**（現状は ONT 生リード＋完全一致ではクラスタが成立しない）。
+
+### 推奨着手順
+
+1. **C++ 汎用 edlib API** — demux の `AnchorHit` ロジックを `src/edlib_utils.cpp` に切り出し、primer 検索で再利用
+2. **`primer_list` 引数追加** — `.parse_primer_pairs()` で `inst/extdata/amplicon_primers.csv` 互換パース
+3. **gene 割当** — `.assign_genes_by_primers()`（両端 window + edlib + 向き判定）→ `gene_assignments.tsv`
+4. **sample × gene バケット** — 現行 `unknown` 固定を置換。未割当は `skip_reason` に反映
+5. **greedy クラスタ** — edlib 距離 ≤ `max_cluster_edit` で ONT エラーを許容
+6. **コンセンサス** — クラスタ内多数決（位置ごと）
+7. **合成リード単体テスト** → **20k 実データ**で gene 分布・クラスタ数を確認
+8. **`devtools::document()`** + README 例更新
+
+### C1 完了の判定基準
+
+- `primer_list` 指定時、各サンプルで複数 `gene_id` が検出される
+- `min_cluster_reads = 5` で有意なクラスタが得られる（距離ベース）
+- 旧 `doAlign` の `target_gene` 分布と粗く相関
+- editcall 再設計（Phase D）への入力として `consensus.fasta` + `cluster_counts.tsv` が使える
 
 ---
 
