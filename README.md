@@ -68,7 +68,7 @@ First, define the paths and parameters for your analysis:
 
 ```r
 # Load the package
-source("R/functions.R")
+library(miaoseq)
 
 # Define working directories
 working_dir <- "/path/to/your/working/directory"
