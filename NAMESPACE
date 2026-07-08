@@ -3,6 +3,7 @@
 export(doAlign)
 export(doBasecall)
 export(doDemultiplex)
+export(doAmpliconResolve)
 export(doEditcall)
 export(editViewer)
 export(evalMiao)
