@@ -1,14 +1,14 @@
 ################################################################################
-# Demultiplexing (edlib: suffix → barcode → optional prefix)
+# Demultiplexing (C++ edlib core: suffix → barcode; R wrapper for I/O)
 ################################################################################
 
-#' Demultiplex reads by dual barcodes (edlib)
+#' Demultiplex reads by dual barcodes
 #'
-#' Classifies multiplexed FASTQ reads into samples using a two-step procedure:
-#' find common adapter **suffix** anchors (loose), extract the nearby **barcode**
-#' (strict dictionary / edit distance), then optionally verify the outer **prefix**.
-#' Primary outputs are assignment tables; sample-specific FASTQ files are written
-#' only when `split_reads = TRUE` (via [splitDemultiplexReads()]).
+#' Classifies multiplexed FASTQ reads into samples using a two-step procedure
+#' implemented in C++ (edlib HW for adapter **suffix** anchors; barcode matching
+#' via a precomputed mutant dictionary). Optional prefix checks are off by
+#' default on the hot path. Primary outputs are assignment tables; sample FASTQ
+#' files are written only when `split_reads = TRUE` (via [splitDemultiplexReads()]).
 #'
 #' @param fastq Character vector of FASTQ paths (`.fq` / `.fastq`, optionally `.gz`).
 #' @param demult_dir Output directory for demultiplex results.
@@ -18,27 +18,27 @@
 #' @param sample_list Optional path to a CSV with at least
 #'   `index_pair_id` and `sample_name` (headerless or with header).
 #'   If omitted, `sample_id` equals `index_pair_id`.
-#' @param n_core Number of CPU cores for parallel chunk processing.
+#' @param n_core Number of OpenMP threads for the C++ core (`1` disables).
 #' @param end_window Bases from each read end to search for anchors.
 #' @param max_anchor_edit Maximum edit distance for suffix detection.
 #' @param max_prefix_edit Maximum edit distance for optional prefix checks.
-#' @param max_barcode_edit Maximum edit distance for barcode matching.
+#' @param max_barcode_edit Maximum edit distance for barcode mutant dictionary.
 #' @param require_prefix If `TRUE`, reject reads without a detectable prefix.
-#' @param prefix_rescue If `TRUE`, re-check ambiguous hits with prefix geometry.
-#' @param require_unique_pair If `TRUE`, reject non-unique valid F/R pairs.
+#' @param check_prefix If `TRUE`, run optional prefix labeling on every hit
+#'   (slower). Ignored when `require_prefix = TRUE` (prefix is always checked).
+#' @param require_unique_pair Kept for API compatibility (pair map is unique by construction).
 #' @param allow_revcomp If `TRUE`, also search reverse-complement windows.
 #' @param split_reads If `TRUE`, call [splitDemultiplexReads()] after assignment.
 #' @param compress Passed to [splitDemultiplexReads()] when `split_reads = TRUE`.
-#' @param chunk_size Number of reads per processing chunk.
+#' @param chunk_size Reads per C++ batch (streaming to limit peak memory).
 #'
-#' @return A list with `assignments`, `summary`, `unassigned`, and `demult_dir`.
+#' @return A list with `assignments`, `summary`, `unassigned`, `demult_dir`,
+#'   and `n_edlib` (total edlib calls in the C++ core).
 #'
 #' @export
-#' @importFrom Biostrings DNAStringSet reverseComplement readDNAStringSet
-#' @importFrom Biostrings writeXStringSet QualityScaledDNAStringSet
-#' @importFrom BiocGenerics width
-#' @importFrom edlibR align
-#' @importFrom parallel mclapply
+#' @useDynLib miaoseq, .registration = TRUE
+#' @importFrom Biostrings readDNAStringSet
+#' @importFrom Rcpp sourceCpp
 #' @importFrom stats setNames
 #' @importFrom utils read.csv write.table
 doDemultiplex <- function(fastq,
@@ -46,17 +46,17 @@ doDemultiplex <- function(fastq,
                           index_list,
                           sample_list = NULL,
                           n_core = 1,
-                          end_window = 60,
+                          end_window = 120,
                           max_anchor_edit = 10,
                           max_prefix_edit = 5,
                           max_barcode_edit = 2,
                           require_prefix = FALSE,
-                          prefix_rescue = TRUE,
+                          check_prefix = FALSE,
                           require_unique_pair = TRUE,
                           allow_revcomp = TRUE,
                           split_reads = FALSE,
                           compress = TRUE,
-                          chunk_size = 5000) {
+                          chunk_size = 20000) {
     if (!dir.exists(demult_dir)) {
         dir.create(demult_dir, recursive = TRUE, showWarnings = FALSE)
     }
@@ -66,52 +66,62 @@ doDemultiplex <- function(fastq,
     }
 
     layout <- .parse_index_layout(index_list)
-    f_dict <- .build_barcode_dict(layout$f_barcodes, max_barcode_edit)
-    r_dict <- .build_barcode_dict(layout$r_barcodes, max_barcode_edit)
-    design <- .validate_barcode_design(layout, max_barcode_edit)
     sample_map <- .load_sample_map(sample_list, layout$sample_map)
+    design <- .validate_barcode_design(layout, max_barcode_edit)
+
+    # diagnostic dict build (also warms logic; core rebuilds maps internally)
+    f_diag <- build_barcode_dict_cpp(unname(layout$f_barcodes),
+                                     names(layout$f_barcodes),
+                                     as.integer(max_barcode_edit))
+    r_diag <- build_barcode_dict_cpp(unname(layout$r_barcodes),
+                                     names(layout$r_barcodes),
+                                     as.integer(max_barcode_edit))
 
     .write_index_layout(layout, file.path(demult_dir, "index_layout.tsv"))
-    write.table(rbind(cbind(side = "F", f_dict$conflicts),
-                      cbind(side = "R", r_dict$conflicts)),
-                file.path(demult_dir, "barcode_conflicts.tsv"),
-                sep = "\t", quote = FALSE, row.names = FALSE)
+    write.table(
+        rbind(
+            data.frame(side = "F",
+                       mutant = f_diag$conflict_mutants,
+                       parents = f_diag$conflict_parents,
+                       stringsAsFactors = FALSE),
+            data.frame(side = "R",
+                       mutant = r_diag$conflict_mutants,
+                       parents = r_diag$conflict_parents,
+                       stringsAsFactors = FALSE)
+        ),
+        file.path(demult_dir, "barcode_conflicts.tsv"),
+        sep = "\t", quote = FALSE, row.names = FALSE
+    )
     write.table(design, file.path(demult_dir, "design_check.tsv"),
                 sep = "\t", quote = FALSE, row.names = FALSE)
 
-    ctx <- list(
-        layout = layout,
-        f_dict = f_dict,
-        r_dict = r_dict,
-        sample_map = sample_map,
-        end_window = as.integer(end_window),
-        max_anchor_edit = as.integer(max_anchor_edit),
-        max_prefix_edit = as.integer(max_prefix_edit),
-        max_barcode_edit = as.integer(max_barcode_edit),
-        require_prefix = isTRUE(require_prefix),
-        prefix_rescue = isTRUE(prefix_rescue),
-        require_unique_pair = isTRUE(require_unique_pair),
-        allow_revcomp = isTRUE(allow_revcomp)
-    )
+    assign_parts <- list()
+    un_parts <- list()
+    n_edlib_total <- 0
 
-    results <- list()
     for (fq in fastq) {
         message("Demultiplexing: ", fq)
-        results[[fq]] <- .demultiplex_fastq_file(
-            fq, ctx, n_core = n_core, chunk_size = chunk_size
+        part <- .demultiplex_fastq_cpp(
+            fq = fq,
+            layout = layout,
+            sample_map = sample_map,
+            n_core = n_core,
+            end_window = end_window,
+            max_anchor_edit = max_anchor_edit,
+            max_prefix_edit = max_prefix_edit,
+            max_barcode_edit = max_barcode_edit,
+            require_prefix = require_prefix,
+            check_prefix = check_prefix || require_prefix,
+            allow_revcomp = allow_revcomp,
+            chunk_size = chunk_size
         )
+        assign_parts[[fq]] <- part$assignments
+        un_parts[[fq]] <- part$unassigned
+        n_edlib_total <- n_edlib_total + part$n_edlib
     }
-    assignments <- do.call(rbind, lapply(results, `[[`, "assignments"))
-    unassigned <- do.call(rbind, lapply(results, `[[`, "unassigned"))
-    if (is.null(assignments)) {
-        assignments <- .empty_assignments()
-    }
-    if (is.null(unassigned)) {
-        unassigned <- .empty_unassigned()
-    }
-    rownames(assignments) <- NULL
-    rownames(unassigned) <- NULL
 
+    assignments <- .rbind_or_empty(assign_parts, .empty_assignments())
+    unassigned <- .rbind_or_empty(un_parts, .empty_unassigned())
     summary_df <- .summarize_assignments(assignments)
     .write_demultiplex_tables(demult_dir, assignments, summary_df, unassigned)
 
@@ -120,9 +130,7 @@ doDemultiplex <- function(fastq,
             fastq = fastq,
             assignments = assignments,
             out_dir = file.path(demult_dir, "by_sample"),
-            compress = compress,
-            include_unassigned = FALSE,
-            n_core = n_core
+            compress = compress
         )
     }
 
@@ -130,7 +138,8 @@ doDemultiplex <- function(fastq,
         assignments = assignments,
         summary = summary_df,
         unassigned = unassigned,
-        demult_dir = demult_dir
+        demult_dir = demult_dir,
+        n_edlib = n_edlib_total
     )
 }
 
@@ -141,12 +150,12 @@ doDemultiplex <- function(fastq,
 #'
 #' @param fastq Character vector of source FASTQ paths.
 #' @param assignments `assignments.tsv` path or a data.frame with
-#'   `read_id` and `sample_id` columns (and ideally `source_file`).
+#'   `read_id` and `sample_id` columns.
 #' @param out_dir Output directory for per-sample FASTQ files.
 #' @param compress If `TRUE`, write `.fq.gz`.
 #' @param include_unassigned If `TRUE`, also write `unassigned.fq(.gz)`.
 #' @param unassigned Optional unassigned table / TSV path.
-#' @param n_core Unused currently (reserved); splitting is single-pass I/O.
+#' @param n_core Unused (reserved).
 #'
 #' @return Invisibly, a named integer vector of reads written per sample.
 #'
@@ -170,15 +179,13 @@ splitDemultiplexReads <- function(fastq,
 }
 
 ################################################################################
-# Phase A: layout / dictionary
+# Layout / diagnostics (R)
 ################################################################################
 
 #' @keywords internal
 .parse_index_layout <- function(index_list) {
     index_df <- utils::read.csv(index_list, header = FALSE, stringsAsFactors = FALSE)
-    if (ncol(index_df) < 5) {
-        stop("index_list must have 5 columns.")
-    }
+    if (ncol(index_df) < 5) stop("index_list must have 5 columns.")
     names(index_df)[1:5] <- c(
         "index_pair_id", "f_index_id", "f_seq", "r_index_id", "r_seq"
     )
@@ -262,131 +269,36 @@ splitDemultiplexReads <- function(fastq,
 }
 
 #' @keywords internal
-.build_barcode_dict <- function(barcodes, max_barcode_edit = 2L) {
-    ids <- names(barcodes)
-    if (is.null(ids) || anyNA(ids) || any(ids == "")) {
-        stop("barcodes must be a named character vector.")
-    }
-    barcodes <- setNames(as.character(unname(barcodes)), ids)
-    max_barcode_edit <- as.integer(max_barcode_edit)
-
-    # mutant_seq -> character vector of parent ids
-    owners <- new.env(hash = TRUE, parent = emptyenv())
-
-    add_owner <- function(seq, id) {
-        if (exists(seq, envir = owners, inherits = FALSE)) {
-            owners[[seq]] <- c(owners[[seq]], id)
-        } else {
-            owners[[seq]] <- id
-        }
-    }
-
-    for (i in seq_along(barcodes)) {
-        parent <- barcodes[[i]]
-        id <- ids[[i]]
-        add_owner(parent, id)
-        if (max_barcode_edit < 1L) next
-        level1 <- .mutate_barcode(parent)
-        for (m in level1) add_owner(m, id)
-        if (max_barcode_edit >= 2L) {
-            for (m1 in level1) {
-                for (m2 in .mutate_barcode(m1)) {
-                    if (!identical(m2, parent)) add_owner(m2, id)
-                }
-            }
-        }
-    }
-
-    keys <- ls(owners, all.names = TRUE)
-    mutant_map <- vector("list", length(keys))
-    names(mutant_map) <- keys
-    conflict_mut <- character()
-    conflict_par <- character()
-    keep <- logical(length(keys))
-    for (i in seq_along(keys)) {
-        k <- keys[[i]]
-        u <- unique(owners[[k]])
-        if (length(u) == 1L) {
-            mutant_map[[i]] <- u
-            keep[i] <- TRUE
-        } else {
-            conflict_mut <- c(conflict_mut, k)
-            conflict_par <- c(conflict_par, paste(u, collapse = ","))
-            keep[i] <- FALSE
-        }
-    }
-    mutant_map <- mutant_map[keep]
-
-    list(
-        barcodes = barcodes,
-        mutant_map = mutant_map,
-        conflicts = data.frame(
-            mutant = conflict_mut,
-            parents = conflict_par,
-            stringsAsFactors = FALSE
-        )
-    )
-}
-
-#' @keywords internal
-.mutate_barcode <- function(seq) {
-    bases <- c("A", "C", "G", "T")
-    chars <- strsplit(seq, "", fixed = TRUE)[[1]]
-    n <- length(chars)
-    out <- new.env(hash = TRUE, parent = emptyenv())
-    put <- function(x) out[[x]] <- TRUE
-
-    for (i in seq_len(n)) {
-        orig <- chars[i]
-        for (b in bases) {
-            if (b != orig) {
-                chars[i] <- b
-                put(paste(chars, collapse = ""))
-            }
-        }
-        chars[i] <- orig
-    }
-    if (n > 1L) {
-        for (i in seq_len(n)) {
-            put(paste(chars[-i], collapse = ""))
-        }
-    }
-    for (i in 0:n) {
-        left <- if (i == 0L) "" else paste(chars[seq_len(i)], collapse = "")
-        right <- if (i == n) "" else paste(chars[(i + 1L):n], collapse = "")
-        for (b in bases) put(paste0(left, b, right))
-    }
-    ls(out, all.names = TRUE)
-}
-
-#' @keywords internal
 .validate_barcode_design <- function(layout, max_barcode_edit) {
-    f_min <- .min_pairwise_edit(layout$f_barcodes)
-    r_min <- .min_pairwise_edit(layout$r_barcodes)
+    # Light check without edlibR: Hamming on equal-length barcodes as lower bound proxy
+    f_min <- .min_hamming(layout$f_barcodes)
+    r_min <- .min_hamming(layout$r_barcodes)
     need <- 2L * as.integer(max_barcode_edit) + 1L
     data.frame(
         side = c("F", "R"),
         n_barcodes = c(length(layout$f_barcodes), length(layout$r_barcodes)),
-        min_edit_distance = c(f_min, r_min),
-        recommended_min = c(need, need),
-        ok = c(f_min >= need, r_min >= need),
+        min_hamming = c(f_min, r_min),
+        recommended_min_edit = c(need, need),
         note = c(
-            if (f_min < need) "Use collision removal; consider lowering max_barcode_edit" else "OK",
-            if (r_min < need) "Use collision removal; consider lowering max_barcode_edit" else "OK"
+            "Hamming lower-bound; C++ dict applies collision removal",
+            "Hamming lower-bound; C++ dict applies collision removal"
         ),
         stringsAsFactors = FALSE
     )
 }
 
 #' @keywords internal
-.min_pairwise_edit <- function(seqs) {
+.min_hamming <- function(seqs) {
     seqs <- unique(as.character(seqs))
     if (length(seqs) < 2) return(NA_integer_)
     best <- Inf
     for (i in seq_len(length(seqs) - 1L)) {
         for (j in (i + 1L):length(seqs)) {
-            d <- edlibR::align(seqs[i], seqs[j], mode = "NW", task = "distance")$editDistance
-            if (!is.na(d) && d < best) best <- d
+            a <- strsplit(seqs[i], "", fixed = TRUE)[[1]]
+            b <- strsplit(seqs[j], "", fixed = TRUE)[[1]]
+            n <- min(length(a), length(b))
+            d <- sum(a[seq_len(n)] != b[seq_len(n)]) + abs(length(a) - length(b))
+            if (d < best) best <- d
         }
     }
     as.integer(best)
@@ -397,8 +309,7 @@ splitDemultiplexReads <- function(fastq,
     sample_map$sample_id <- sample_map$index_pair_id
     if (is.null(sample_list)) return(sample_map)
     sl <- utils::read.csv(sample_list, header = FALSE, stringsAsFactors = FALSE)
-    if (ncol(sl) < 2) stop("sample_list needs at least 2 columns: index_pair_id, sample_name.")
-    # If first row looks like a header, drop it
+    if (ncol(sl) < 2) stop("sample_list needs at least 2 columns.")
     if (identical(tolower(sl[1, 1]), "index_pair_id") ||
         identical(tolower(sl[1, 1]), "index_pair")) {
         sl <- sl[-1, , drop = FALSE]
@@ -423,425 +334,108 @@ splitDemultiplexReads <- function(fastq,
 }
 
 ################################################################################
-# Phase B: per-read scoring
+# C++ driver
 ################################################################################
 
 #' @keywords internal
-.demultiplex_fastq_file <- function(fastq, ctx, n_core = 1, chunk_size = 5000) {
-    reads <- .read_fastq_seqs(fastq)
+.demultiplex_fastq_cpp <- function(fq, layout, sample_map, n_core,
+                                   end_window, max_anchor_edit, max_prefix_edit,
+                                   max_barcode_edit, require_prefix, check_prefix,
+                                   allow_revcomp, chunk_size) {
+    reads <- .read_fastq_seqs(fq)
     n <- length(reads)
     if (n < 1) {
         return(list(assignments = .empty_assignments(),
-                    unassigned = .empty_unassigned()))
+                    unassigned = .empty_unassigned(),
+                    n_edlib = 0))
     }
     ids <- names(reads)
     seqs <- as.character(reads)
-    starts <- seq(1L, n, by = chunk_size)
-    chunks <- lapply(starts, function(s) {
-        e <- min(s + chunk_size - 1L, n)
-        list(ids = ids[s:e], seqs = seqs[s:e])
-    })
 
-    worker <- function(chunk) {
-        .demultiplex_chunk(chunk$ids, chunk$seqs, source_file = fastq, ctx = ctx)
+    starts <- seq(1L, n, by = as.integer(chunk_size))
+    assign_rows <- list()
+    un_rows <- list()
+    n_edlib <- 0
+
+    for (s in starts) {
+        e <- min(s + as.integer(chunk_size) - 1L, n)
+        res <- demux_reads_cpp(
+            seqs = seqs[s:e],
+            ids = ids[s:e],
+            f_suffix = layout$f_suffix,
+            r_suffix = layout$r_suffix,
+            f_prefix = layout$f_prefix,
+            r_prefix = layout$r_prefix,
+            f_barcodes = unname(layout$f_barcodes),
+            f_barcode_names = names(layout$f_barcodes),
+            r_barcodes = unname(layout$r_barcodes),
+            r_barcode_names = names(layout$r_barcodes),
+            pair_f_names = sample_map$f_index_id,
+            pair_r_names = sample_map$r_index_id,
+            pair_ids = sample_map$index_pair_id,
+            sample_ids = sample_map$sample_id,
+            end_window = as.integer(end_window),
+            max_anchor_edit = as.integer(max_anchor_edit),
+            max_prefix_edit = as.integer(max_prefix_edit),
+            max_barcode_edit = as.integer(max_barcode_edit),
+            require_prefix = isTRUE(require_prefix),
+            check_prefix = isTRUE(check_prefix),
+            allow_revcomp = isTRUE(allow_revcomp),
+            n_core = as.integer(n_core)
+        )
+        n_edlib <- n_edlib + res$n_edlib
+        assigned <- which(res$status == 1L)
+        failed <- which(res$status == 0L)
+        if (length(assigned)) {
+            assign_rows[[length(assign_rows) + 1L]] <- data.frame(
+                read_id = res$read_id[assigned],
+                index_pair_id = res$index_pair_id[assigned],
+                f_index_id = res$f_index_id[assigned],
+                r_index_id = res$r_index_id[assigned],
+                sample_id = res$sample_id[assigned],
+                source_file = fq,
+                barcode_edit_f = res$barcode_edit_f[assigned],
+                barcode_edit_r = res$barcode_edit_r[assigned],
+                match_class = res$match_class[assigned],
+                anchor_status = res$anchor_status[assigned],
+                prefix_edit_f = ifelse(res$prefix_edit_f[assigned] < 0, NA_integer_,
+                                       res$prefix_edit_f[assigned]),
+                prefix_edit_r = ifelse(res$prefix_edit_r[assigned] < 0, NA_integer_,
+                                       res$prefix_edit_r[assigned]),
+                stringsAsFactors = FALSE
+            )
+        }
+        if (length(failed)) {
+            un_rows[[length(un_rows) + 1L]] <- data.frame(
+                read_id = res$read_id[failed],
+                reason = res$reason[failed],
+                source_file = fq,
+                stringsAsFactors = FALSE
+            )
+        }
     }
 
-    if (n_core > 1 && length(chunks) > 1) {
-        parts <- parallel::mclapply(chunks, worker, mc.cores = n_core)
-    } else {
-        parts <- lapply(chunks, worker)
-    }
-
-    assignments <- do.call(rbind, lapply(parts, `[[`, "assignments"))
-    unassigned <- do.call(rbind, lapply(parts, `[[`, "unassigned"))
-    list(assignments = assignments, unassigned = unassigned)
+    list(
+        assignments = .rbind_or_empty(assign_rows, .empty_assignments()),
+        unassigned = .rbind_or_empty(un_rows, .empty_unassigned()),
+        n_edlib = n_edlib
+    )
 }
 
 #' @keywords internal
 .read_fastq_seqs <- function(fastq) {
-    # Quality is ignored for demux; keep sequence + IDs.
     ext <- tolower(fastq)
-    if (grepl("\\.gz$", ext)) {
-        con <- gzfile(fastq, open = "rt")
-        on.exit(close(con), add = TRUE)
-        # Biostrings handles gz paths directly
-        ss <- Biostrings::readDNAStringSet(fastq, format = "fastq")
-    } else if (grepl("\\.(fq|fastq)$", ext)) {
+    if (grepl("\\.(fq|fastq)(\\.gz)?$", ext) || grepl("\\.gz$", ext)) {
         ss <- Biostrings::readDNAStringSet(fastq, format = "fastq")
     } else {
-        # allow FASTA for testing
         ss <- Biostrings::readDNAStringSet(fastq)
     }
     names(ss) <- vapply(strsplit(names(ss), "\\s+"), `[[`, character(1), 1L)
     ss
 }
 
-#' @keywords internal
-.demultiplex_chunk <- function(ids, seqs, source_file, ctx) {
-    assign_rows <- list()
-    un_rows <- list()
-    for (i in seq_along(ids)) {
-        res <- .score_read_indices(ids[[i]], seqs[[i]], source_file, ctx)
-        if (identical(res$status, "assigned")) {
-            assign_rows[[length(assign_rows) + 1L]] <- res$row
-        } else {
-            un_rows[[length(un_rows) + 1L]] <- data.frame(
-                read_id = ids[[i]],
-                reason = res$reason,
-                source_file = source_file,
-                stringsAsFactors = FALSE
-            )
-        }
-    }
-    list(
-        assignments = if (length(assign_rows)) do.call(rbind, assign_rows) else .empty_assignments(),
-        unassigned = if (length(un_rows)) do.call(rbind, un_rows) else .empty_unassigned()
-    )
-}
-
-#' @keywords internal
-.score_read_indices <- function(read_id, seq, source_file, ctx) {
-    seq <- toupper(gsub("[^ACGT]", "N", seq))
-    n <- nchar(seq)
-    w <- min(ctx$end_window, n)
-    front <- substr(seq, 1, w)
-    rear <- substr(seq, n - w + 1, n)
-
-    f_hit <- .match_end(
-        window = front,
-        suffix = ctx$layout$f_suffix,
-        prefix = ctx$layout$f_prefix,
-        barcode_len = ctx$layout$f_barcode_len,
-        dict = ctx$f_dict,
-        ctx = ctx,
-        barcode_before_suffix = TRUE
-    )
-    r_hit <- .match_end(
-        window = rear,
-        suffix = ctx$layout$r_suffix,
-        prefix = ctx$layout$r_prefix,
-        barcode_len = ctx$layout$r_barcode_len,
-        dict = ctx$r_dict,
-        ctx = ctx,
-        barcode_before_suffix = FALSE
-    )
-
-    # Orientation flip: F may be on rear / R on front (adapter strand order unchanged)
-    if ((is.null(f_hit) || is.null(r_hit)) && ctx$allow_revcomp) {
-        f_hit2 <- .match_end(
-            window = rear,
-            suffix = ctx$layout$f_suffix,
-            prefix = ctx$layout$f_prefix,
-            barcode_len = ctx$layout$f_barcode_len,
-            dict = ctx$f_dict,
-            ctx = ctx,
-            barcode_before_suffix = TRUE
-        )
-        r_hit2 <- .match_end(
-            window = front,
-            suffix = ctx$layout$r_suffix,
-            prefix = ctx$layout$r_prefix,
-            barcode_len = ctx$layout$r_barcode_len,
-            dict = ctx$r_dict,
-            ctx = ctx,
-            barcode_before_suffix = FALSE
-        )
-        if (!is.null(f_hit2) && !is.null(r_hit2)) {
-            f_hit <- f_hit2
-            r_hit <- r_hit2
-        }
-    }
-
-    if (is.null(f_hit) && is.null(r_hit)) {
-        return(list(status = "unassigned", reason = "no_suffix"))
-    }
-    if (is.null(f_hit) || is.null(r_hit)) {
-        return(list(status = "unassigned", reason = "barcode_fail"))
-    }
-    if (identical(f_hit$reason, "ambiguous") || identical(r_hit$reason, "ambiguous")) {
-        if (ctx$prefix_rescue) {
-            rescued <- .prefix_rescue_pair(f_hit, r_hit, ctx)
-            if (is.null(rescued)) {
-                return(list(status = "unassigned", reason = "rescue_fail"))
-            }
-            f_hit <- rescued$f
-            r_hit <- rescued$r
-            f_hit$rescued <- TRUE
-            r_hit$rescued <- TRUE
-        } else {
-            return(list(status = "unassigned", reason = "ambiguous_pair"))
-        }
-    }
-    if (is.null(f_hit$id) || is.null(r_hit$id)) {
-        return(list(status = "unassigned", reason = "barcode_fail"))
-    }
-
-    if (ctx$require_prefix &&
-        (is.na(f_hit$prefix_edit) || is.na(r_hit$prefix_edit))) {
-        return(list(status = "unassigned", reason = "no_prefix"))
-    }
-
-    pair_key <- paste(f_hit$id, r_hit$id, sep = "\t")
-    sm <- ctx$sample_map
-    hits <- which(sm$pair_key == pair_key)
-    if (length(hits) == 0) {
-        return(list(status = "unassigned", reason = "invalid_pair"))
-    }
-    if (ctx$require_unique_pair && length(hits) > 1) {
-        return(list(status = "unassigned", reason = "ambiguous_pair"))
-    }
-    hit <- hits[[1]]
-
-    match_class <- if (f_hit$barcode_edit == 0L && r_hit$barcode_edit == 0L) {
-        "complete_match"
-    } else {
-        "fuzzy_match"
-    }
-    rescued <- isTRUE(f_hit$rescued) || isTRUE(r_hit$rescued)
-    both_prefix <- !is.na(f_hit$prefix_edit) && !is.na(r_hit$prefix_edit)
-    anchor_status <- if (rescued) {
-        "rescued"
-    } else if (both_prefix) {
-        "high_confidence"
-    } else {
-        "partial_anchor"
-    }
-
-    row <- data.frame(
-        read_id = read_id,
-        index_pair_id = sm$index_pair_id[hit],
-        f_index_id = f_hit$id,
-        r_index_id = r_hit$id,
-        sample_id = sm$sample_id[hit],
-        source_file = source_file,
-        barcode_edit_f = f_hit$barcode_edit,
-        barcode_edit_r = r_hit$barcode_edit,
-        match_class = match_class,
-        anchor_status = anchor_status,
-        prefix_edit_f = f_hit$prefix_edit,
-        prefix_edit_r = r_hit$prefix_edit,
-        stringsAsFactors = FALSE
-    )
-    list(status = "assigned", row = row)
-}
-
-#' @keywords internal
-.find_suffix_anchor <- function(window, suffix, max_anchor_edit, allow_revcomp = TRUE) {
-    window <- toupper(window)
-    cands <- list()
-    consider <- function(seq, flipped) {
-        aln <- edlibR::align(suffix, seq, mode = "HW", task = "locations",
-                             k = max_anchor_edit)
-        if (is.null(aln$editDistance) || is.na(aln$editDistance) ||
-            aln$editDistance < 0 || aln$editDistance > max_anchor_edit) {
-            return(invisible(NULL))
-        }
-        locs <- aln$locations
-        if (is.null(locs) || length(locs) < 1) return(invisible(NULL))
-        for (loc in locs) {
-            cands[[length(cands) + 1L]] <<- list(
-                seq = seq,
-                flipped = flipped,
-                edit = as.integer(aln$editDistance),
-                start = as.integer(loc[1] + 1L),
-                end = as.integer(loc[2] + 1L)
-            )
-        }
-        invisible(NULL)
-    }
-    consider(window, FALSE)
-    if (allow_revcomp) {
-        consider(.revcomp_char(window), TRUE)
-    }
-    if (!length(cands)) return(NULL)
-    # Prefer lower edit distance, then enough room for a barcode before suffix.
-    edits <- vapply(cands, `[[`, integer(1), "edit")
-    cands <- cands[order(edits)]
-    cands
-}
-
-#' @keywords internal
-.match_end <- function(window, suffix, prefix, barcode_len, dict, ctx,
-                       barcode_before_suffix = TRUE) {
-    anchors <- .find_suffix_anchor(window, suffix, ctx$max_anchor_edit, ctx$allow_revcomp)
-    if (is.null(anchors)) return(NULL)
-
-    best <- NULL
-    max_shift <- min(4L, as.integer(ctx$max_anchor_edit))
-    for (anchor in anchors) {
-        for (off in c(0L, unlist(lapply(seq_len(max_shift), function(x) c(-x, x))))) {
-            bc <- .extract_barcode(anchor$seq, anchor$start, anchor$end,
-                                   barcode_len, barcode_before_suffix, offset = off)
-            if (is.null(bc)) next
-            matched <- .match_barcode(bc, dict, ctx$max_barcode_edit)
-            barcode_start <- if (barcode_before_suffix) {
-                anchor$start - barcode_len + off
-            } else {
-                anchor$end + 1L + off
-            }
-            barcode_end <- barcode_start + barcode_len - 1L
-            prefix_edit <- .check_prefix_optional(
-                seq = anchor$seq,
-                prefix = prefix,
-                barcode_start = barcode_start,
-                barcode_end = barcode_end,
-                max_prefix_edit = ctx$max_prefix_edit,
-                barcode_before_suffix = barcode_before_suffix
-            )
-            ambiguous <- isTRUE(matched$ambiguous)
-            cand <- list(
-                id = matched$id,
-                barcode_edit = matched$edit,
-                prefix_edit = prefix_edit,
-                reason = if (is.null(matched$id) && !ambiguous) "barcode_fail" else
-                    if (ambiguous) "ambiguous" else NA_character_,
-                ambiguous = ambiguous,
-                candidates = matched$candidates,
-                barcode_seq = bc,
-                anchor = anchor,
-                rescued = FALSE
-            )
-            score <- c(
-                as.integer(!is.null(cand$id) || ambiguous),
-                -if (is.null(cand$barcode_edit) || is.na(cand$barcode_edit)) 99L else cand$barcode_edit,
-                -abs(as.integer(off)),
-                -anchor$edit
-            )
-            if (is.null(best) ||
-                score[1] > best$.score[1] ||
-                (score[1] == best$.score[1] && score[2] > best$.score[2]) ||
-                (score[1] == best$.score[1] && score[2] == best$.score[2] &&
-                 score[3] > best$.score[3]) ||
-                (score[1] == best$.score[1] && score[2] == best$.score[2] &&
-                 score[3] == best$.score[3] && score[4] > best$.score[4])) {
-                best <- cand
-                best$.score <- score
-            }
-            if (!is.null(cand$id) && !ambiguous &&
-                identical(cand$barcode_edit, 0L) && identical(off, 0L)) {
-                best$.score <- NULL
-                return(best)
-            }
-        }
-    }
-    if (is.null(best)) return(NULL)
-    best$.score <- NULL
-    best
-}
-
-#' @keywords internal
-.revcomp_char <- function(seq) {
-    as.character(Biostrings::reverseComplement(Biostrings::DNAStringSet(seq)))
-}
-
-#' @keywords internal
-.extract_barcode <- function(seq, suffix_start, suffix_end, barcode_len,
-                             barcode_before_suffix = TRUE, offset = 0L) {
-    if (barcode_before_suffix) {
-        to <- suffix_start - 1L + offset
-        from <- to - barcode_len + 1L
-    } else {
-        from <- suffix_end + 1L + offset
-        to <- from + barcode_len - 1L
-    }
-    if (from < 1 || to > nchar(seq) || from > to) return(NULL)
-    substr(seq, from, to)
-}
-
-#' @keywords internal
-.match_barcode <- function(barcode_seq, dict, max_barcode_edit) {
-    barcode_seq <- toupper(barcode_seq)
-    if (!is.null(dict$mutant_map[[barcode_seq]])) {
-        id <- dict$mutant_map[[barcode_seq]]
-        edit <- edlibR::align(barcode_seq, dict$barcodes[[id]],
-                              mode = "NW", task = "distance")$editDistance
-        return(list(id = id, edit = as.integer(edit),
-                    ambiguous = FALSE, candidates = id))
-    }
-    # fallback: NW against all barcodes
-    edits <- vapply(dict$barcodes, function(bc) {
-        edlibR::align(barcode_seq, bc, mode = "NW",
-                      task = "distance", k = max_barcode_edit)$editDistance
-    }, integer(1))
-    edits[is.na(edits) | edits < 0] <- max_barcode_edit + 1L
-    ok <- which(edits <= max_barcode_edit)
-    if (length(ok) == 0) {
-        return(list(id = NULL, edit = NA_integer_, ambiguous = FALSE,
-                    candidates = character()))
-    }
-    min_e <- min(edits[ok])
-    cand <- names(dict$barcodes)[ok][edits[ok] == min_e]
-    if (length(cand) > 1) {
-        return(list(id = NULL, edit = as.integer(min_e),
-                    ambiguous = TRUE, candidates = cand))
-    }
-    list(id = cand[[1]], edit = as.integer(min_e),
-         ambiguous = FALSE, candidates = cand)
-}
-
-#' @keywords internal
-.check_prefix_optional <- function(seq, prefix, barcode_start, barcode_end,
-                                   max_prefix_edit, barcode_before_suffix) {
-    # Search a small window outside the barcode for prefix.
-    if (barcode_before_suffix) {
-        # prefix should be immediately before barcode
-        from <- max(1L, barcode_start - nchar(prefix) - 4L)
-        to <- max(1L, barcode_start - 1L)
-    } else {
-        # prefix after barcode toward outer end
-        from <- min(nchar(seq), barcode_end + 1L)
-        to <- min(nchar(seq), barcode_end + nchar(prefix) + 4L)
-    }
-    if (from > to) return(NA_integer_)
-    region <- substr(seq, from, to)
-    if (nchar(region) < 1) return(NA_integer_)
-    aln <- edlibR::align(prefix, region, mode = "HW", task = "distance",
-                         k = max_prefix_edit)
-    if (is.null(aln$editDistance) || is.na(aln$editDistance) ||
-        aln$editDistance < 0 || aln$editDistance > max_prefix_edit) {
-        return(NA_integer_)
-    }
-    as.integer(aln$editDistance)
-}
-
-#' @keywords internal
-.prefix_rescue_pair <- function(f_hit, r_hit, ctx) {
-    # Keep candidate IDs that have detectable prefix when ambiguous.
-    resolve_one <- function(hit, prefix, barcode_len, before) {
-        if (!isTRUE(hit$ambiguous) && !is.null(hit$id)) return(hit)
-        cands <- hit$candidates
-        if (length(cands) < 1) return(NULL)
-        keep <- cands
-        # Prefer candidates whose expected barcode equals extracted (already true)
-        # and whose prefix is present.
-        if (is.na(hit$prefix_edit)) return(NULL)
-        if (length(keep) == 1) {
-            hit$id <- keep[[1]]
-            hit$ambiguous <- FALSE
-            hit$reason <- NA_character_
-            return(hit)
-        }
-        NULL
-    }
-    f2 <- resolve_one(f_hit, ctx$layout$f_prefix, ctx$layout$f_barcode_len, TRUE)
-    r2 <- resolve_one(r_hit, ctx$layout$r_prefix, ctx$layout$r_barcode_len, FALSE)
-    if (is.null(f2) || is.null(r2) || is.null(f2$id) || is.null(r2$id)) return(NULL)
-    # Among ambiguous candidate pairs, keep those present in sample_map
-    f_cands <- if (length(f_hit$candidates)) f_hit$candidates else f2$id
-    r_cands <- if (length(r_hit$candidates)) r_hit$candidates else r2$id
-    keys <- as.vector(outer(f_cands, r_cands, paste, sep = "\t"))
-    hit_i <- which(ctx$sample_map$pair_key %in% keys)
-    if (length(hit_i) != 1L) return(NULL)
-    sm <- ctx$sample_map[hit_i, ]
-    f2$id <- sm$f_index_id
-    r2$id <- sm$r_index_id
-    f2$ambiguous <- FALSE
-    r2$ambiguous <- FALSE
-    list(f = f2, r = r2)
-}
-
 ################################################################################
-# Phase C: outputs
+# Output helpers
 ################################################################################
 
 #' @keywords internal
@@ -871,6 +465,15 @@ splitDemultiplexReads <- function(fastq,
         source_file = character(),
         stringsAsFactors = FALSE
     )
+}
+
+#' @keywords internal
+.rbind_or_empty <- function(parts, empty) {
+    parts <- Filter(function(x) !is.null(x) && nrow(x) > 0, parts)
+    if (!length(parts)) return(empty)
+    out <- do.call(rbind, parts)
+    rownames(out) <- NULL
+    out
 }
 
 #' @keywords internal
@@ -915,7 +518,7 @@ splitDemultiplexReads <- function(fastq,
 }
 
 ################################################################################
-# Phase D: split FASTQ
+# split FASTQ
 ################################################################################
 
 #' @keywords internal
@@ -949,7 +552,6 @@ splitDemultiplexReads <- function(fastq,
         cons[[s]] <- if (compress) gzfile(path, open = "wt") else file(path, open = "wt")
     }
     un_con <- NULL
-    un_count <- 0L
     if (length(un_ids)) {
         path <- file.path(out_dir, paste0("unassigned", ext))
         un_con <- if (compress) gzfile(path, open = "wt") else file(path, open = "wt")

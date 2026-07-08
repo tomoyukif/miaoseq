@@ -2,7 +2,7 @@
 % Please edit documentation in R/demultiplex.R
 \name{doDemultiplex}
 \alias{doDemultiplex}
-\title{Demultiplex reads by dual barcodes (edlib)}
+\title{Demultiplex reads by dual barcodes}
 \usage{
 doDemultiplex(
   fastq,
@@ -10,17 +10,17 @@ doDemultiplex(
   index_list,
   sample_list = NULL,
   n_core = 1,
-  end_window = 60,
+  end_window = 120,
   max_anchor_edit = 10,
   max_prefix_edit = 5,
   max_barcode_edit = 2,
   require_prefix = FALSE,
-  prefix_rescue = TRUE,
+  check_prefix = FALSE,
   require_unique_pair = TRUE,
   allow_revcomp = TRUE,
   split_reads = FALSE,
   compress = TRUE,
-  chunk_size = 5000
+  chunk_size = 20000
 )
 }
 \arguments{
@@ -36,7 +36,7 @@ reverse index ID, reverse index sequence.}
 \code{index_pair_id} and \code{sample_name} (headerless or with header).
 If omitted, \code{sample_id} equals \code{index_pair_id}.}
 
-\item{n_core}{Number of CPU cores for parallel chunk processing.}
+\item{n_core}{Number of OpenMP threads for the C++ core (\code{1} disables).}
 
 \item{end_window}{Bases from each read end to search for anchors.}
 
@@ -44,13 +44,14 @@ If omitted, \code{sample_id} equals \code{index_pair_id}.}
 
 \item{max_prefix_edit}{Maximum edit distance for optional prefix checks.}
 
-\item{max_barcode_edit}{Maximum edit distance for barcode matching.}
+\item{max_barcode_edit}{Maximum edit distance for barcode mutant dictionary.}
 
 \item{require_prefix}{If \code{TRUE}, reject reads without a detectable prefix.}
 
-\item{prefix_rescue}{If \code{TRUE}, re-check ambiguous hits with prefix geometry.}
+\item{check_prefix}{If \code{TRUE}, run optional prefix labeling on every hit
+(slower). Ignored when \code{require_prefix = TRUE} (prefix is always checked).}
 
-\item{require_unique_pair}{If \code{TRUE}, reject non-unique valid F/R pairs.}
+\item{require_unique_pair}{Kept for API compatibility (pair map is unique by construction).}
 
 \item{allow_revcomp}{If \code{TRUE}, also search reverse-complement windows.}
 
@@ -58,15 +59,16 @@ If omitted, \code{sample_id} equals \code{index_pair_id}.}
 
 \item{compress}{Passed to \code{\link[=splitDemultiplexReads]{splitDemultiplexReads()}} when \code{split_reads = TRUE}.}
 
-\item{chunk_size}{Number of reads per processing chunk.}
+\item{chunk_size}{Reads per C++ batch (streaming to limit peak memory).}
 }
 \value{
-A list with \code{assignments}, \code{summary}, \code{unassigned}, and \code{demult_dir}.
+A list with \code{assignments}, \code{summary}, \code{unassigned}, \code{demult_dir},
+and \code{n_edlib} (total edlib calls in the C++ core).
 }
 \description{
-Classifies multiplexed FASTQ reads into samples using a two-step procedure:
-find common adapter \strong{suffix} anchors (loose), extract the nearby \strong{barcode}
-(strict dictionary / edit distance), then optionally verify the outer \strong{prefix}.
-Primary outputs are assignment tables; sample-specific FASTQ files are written
-only when \code{split_reads = TRUE} (via \code{\link[=splitDemultiplexReads]{splitDemultiplexReads()}}).
+Classifies multiplexed FASTQ reads into samples using a two-step procedure
+implemented in C++ (edlib HW for adapter \strong{suffix} anchors; barcode matching
+via a precomputed mutant dictionary). Optional prefix checks are off by
+default on the hot path. Primary outputs are assignment tables; sample FASTQ
+files are written only when \code{split_reads = TRUE} (via \code{\link[=splitDemultiplexReads]{splitDemultiplexReads()}}).
 }

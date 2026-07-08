@@ -1,0 +1,7 @@
+run	elapsed_sec	n_edlib	n_edlib_per_read	n_total	n_assigned	assign_rate	n_blast	BLAST_both	n_agree	pair_agree	false_vs_BLAST	new_vs_baseline_agree	n_new_vs_baseline	n_high	assign_rate_high	BLAST_both_high	pair_agree_high
+baseline	1.07	160000	8	20000	10433	0.5216	9414	8277	8008	0.9675	269	NA	NA	NA	NA	NA	NA
+pair_constrained	1.05	160000	8	20000	10974	0.5487	9414	8197	7856	0.9584	341	0.23489932885906	1046	NA	NA	NA	NA
+sandwich_rescue	1.63	5110682	255.53	20000	11507	0.5754	9414	8458	8083	0.9557	375	0.408839779005525	1074	NA	NA	NA	NA
+pass_b_full_index	7.61	29537536	1476.88	20000	11865	0.5933	9414	8917	8557	0.9596	360	0.8578125	1432	NA	NA	NA	NA
+one_end_constrained	1.04	659572	32.98	20000	11946	0.5973	9414	8664	8234	0.9504	430	0.583979328165375	1513	NA	NA	NA	NA
+confidence_gate	0.92	160000	8	20000	10433	0.5216	9414	8277	8008	0.9675	269	NA	0	6649	0.3325	6354	0.9997

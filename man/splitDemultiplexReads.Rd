@@ -18,7 +18,7 @@ splitDemultiplexReads(
 \item{fastq}{Character vector of source FASTQ paths.}
 
 \item{assignments}{\code{assignments.tsv} path or a data.frame with
-\code{read_id} and \code{sample_id} columns (and ideally \code{source_file}).}
+\code{read_id} and \code{sample_id} columns.}
 
 \item{out_dir}{Output directory for per-sample FASTQ files.}
 
@@ -28,7 +28,7 @@ splitDemultiplexReads(
 
 \item{unassigned}{Optional unassigned table / TSV path.}
 
-\item{n_core}{Unused currently (reserved); splitting is single-pass I/O.}
+\item{n_core}{Unused (reserved).}
 }
 \value{
 Invisibly, a named integer vector of reads written per sample.

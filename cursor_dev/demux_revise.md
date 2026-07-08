@@ -5,6 +5,7 @@
 - 2026-07-08 — **2段階方式**（アンカー検出 → barcode 抽出・照合）に変更
 - 2026-07-08 — **suffix 中心 + prefix 補助**（truncate 許容 / 曖昧ケースのみ rescue）に変更
 - 2026-07-08 — **出力を assignments 表中心に変更**、`splitDemultiplexReads()` 分離、`basecall.R` 廃止方針を反映
+- 2026-07-08 — **速度: ホットパスは C++（Rcpp+edlib）**。R は API / I/O のみ（§15）
 参照:
 - [cursor_dev/ontbarcoder_demux.md](ontbarcoder_demux.md)
 - [cursor_dev/pipeline_revise.md](pipeline_revise.md)
@@ -136,27 +137,40 @@ ONTbarcoder の安全策を取り入れる。
 
 ## 4. 依存パッケージ
 
-### 4.1 edlibR
+### 4.1 edlib（C/C++ 直結 — edlibR は使わない）
 
-```r
-edlibR::align(query, target, mode = "HW", task = "locations", k = max_edit)
+**決定:** demux の align は **edlib 本体を C++ から直接呼ぶ**。`edlibR` は R ラッパ経由のため、リード×数千〜百万のホットパスでは不要なオーバーヘッドになる。C++ 実装の方が速いのでそちらを採用する。
+
+```cpp
+#include "edlib.h"
+EdlibAlignResult r = edlibAlign(
+  query, qlen, target, tlen,
+  edlibNewAlignConfig(max_edit, EDLIB_MODE_HW, EDLIB_TASK_LOC, NULL, 0)
+);
+// r.editDistance, r.startLocations, r.endLocations
+edlibFreeAlignResult(r);
 ```
 
-| 段階 | mode | 用途 |
-|------|------|------|
-| suffix アンカー検出 | `HW` | 端ウィンドウ内の infix として位置特定（必須） |
-| prefix 検証 / rescue | `HW` | barcode 外側近傍での補助確認（任意・条件付き） |
-| barcode 照合 | 辞書 lookup 優先、必要時 edlib `NW` | 10 bp 短配列の厳密照合 |
+| 段階 | mode | 用途 | 実装 |
+|------|------|------|------|
+| suffix アンカー検出 | `HW` + `TASK_LOC` | 端ウィンドウ内の位置特定（必須） | **C++ edlib** |
+| prefix 検証 / rescue | `HW` | 任意・条件付きのみ | **C++ edlib** |
+| barcode 照合 | なし（辞書） | 変異体 `unordered_map` lookup | C++（edlib 不使用） |
+
+出典: [Martinsos/edlib](https://github.com/Martinsos/edlib)（ONTbarcoder と同じライブラリ）。`src/edlib/` にソース同梱するか、ビルド時にリンクする。
 
 ### 4.2 DESCRIPTION への追加 / 削除
 
 ```
 Imports:
-    edlibR
+    Rcpp
+LinkingTo:
+    Rcpp
 ```
 
-`doBasecall` 廃止に伴い、Dorado / samtools 呼び出し前提の記述は Description / README から除去する。BLAST は demux では不要（他ステップで使う場合は残す）。
-
+- **demux 実行時依存から `edlibR` を外す**（DESCRIPTION Imports からも削除）
+- 現行 R プロトタイプが使う `edlibR` は C++ コア置換時に **完全撤去**
+- `doBasecall` 廃止に伴い Dorado / samtools 前提は Description / README から除去。BLAST は demux では不要
 ---
 
 ## 5. アルゴリズム概要
@@ -184,7 +198,7 @@ Imports:
 | tag 切り出し | **barcode 切り出し**（suffix 直前 10 bp） |
 | tag 辞書 lookup（≤2） | **barcode 辞書 lookup**（≤ `max_barcode_edit`） |
 | サンプル別 FASTA 出力 | **任意**: `splitDemultiplexReads()` |
-| 両端 window 100 bp | `end_window`（デフォルト 60 bp） |
+| 両端 window | `end_window`（デフォルト 120 bp） |
 
 ---
 
@@ -222,12 +236,11 @@ F barcode min dist = 3, R = 4。`max_barcode_edit = 2` では衝突除去必須�
 
 | パラメータ | デフォルト | 段階 | 説明 |
 |-----------|-----------|------|------|
-| `end_window` | `60` | 共通 | 両端探索ウィンドウ長（bp） |
+| `end_window` | `120` | 共通 | 両端探索ウィンドウ長（bp） |
 | `max_anchor_edit` | `10` | suffix | 必須アンカー許容編集距離 |
-| `max_prefix_edit` | `5` | prefix | prefix 検証 / rescue 許容編集距離 |
-| `max_barcode_edit` | `2` | barcode | barcode 許容編集距離 |
+| `max_prefix_edit` | `5` | prefix | prefix 検証許容編集距離 |
+| `max_barcode_edit` | `2` | barcode | barcode 許容編集距離（dict） |
 | `require_prefix` | `FALSE` | prefix | `TRUE` なら prefix 必須（非推奨） |
-| `prefix_rescue` | `TRUE` | prefix | 曖昧時のみ prefix 再確認 |
 | `require_unique_pair` | `TRUE` | ペア | 有効ペアが一意でなければ未割り当て |
 | `allow_revcomp` | `TRUE` | 共通 | 逆相補も探索 |
 | `split_reads` | `FALSE` | 出力 | `TRUE` なら末尾で `splitDemultiplexReads()` を呼ぶ |
@@ -235,22 +248,20 @@ F barcode min dist = 3, R = 4。`max_barcode_edit = 2` では衝突除去必須�
 ### 7.2 通常パス
 
 1. **suffix 検出（必須）** — 失敗なら unassigned  
-2. **barcode 切り出し** — suffix 直前 10 bp  
-3. **barcode 照合** — 辞書 / edlib。`barcode_edit_*` に barcode 距離のみ記録  
-4. **prefix 任意検証** — 検出なら `high_confidence`、未検出なら `partial_anchor`（棄却しない）  
+2. **barcode 切り出し** — suffix 直前 10 bp + offset ±0..4 → dict  
+3. **向き判定** — F@front+R@rear / F@rear+R@front の合法ペアを比較して割当  
+4. **prefix** — 任意ラベル（`check_prefix`）。必須にするのは `require_prefix` のみ  
 
-### 7.3 prefix_rescue（曖昧時のみ）
+> **注 (2026-07-08):** dict miss 時の NW rescue / Top-K salvage は試したが、  
+> BLAST 合意を落とさずに recall を実質改善できず、**コードから撤去**した。
 
-曖昧条件の例: barcode 同点、閾値付近、複数ペア候補、端境界ヒット。  
-rescue 成功 → `rescued`、失敗 → unassigned。
-
-### 7.4 分類ラベル
+### 7.3 分類ラベル
 
 | 列 | 値 |
 |----|----|
 | `match_class` | `complete_match` / `fuzzy_match` |
-| `anchor_status` | `high_confidence` / `partial_anchor` / `rescued` |
-| unassigned `reason` | `no_suffix` / `barcode_fail` / `ambiguous_pair` / `rescue_fail` / ... |
+| `anchor_status` | `high_confidence` / `partial_anchor` |
+| unassigned `reason` | `no_suffix` / `barcode_fail` / `invalid_pair` / `ambiguous_pair` / `no_prefix` |
 
 ---
 
@@ -353,7 +364,7 @@ doDemultiplex <- function(fastq,
                           index_list,
                           sample_list = NULL,
                           n_core = 1,
-                          end_window = 60,
+                          end_window = 120,
                           max_anchor_edit = 10,
                           max_prefix_edit = 5,
                           max_barcode_edit = 2,
@@ -445,17 +456,17 @@ R/demultiplex.R（または demultiplex_edlib.R を吸収）
 
 ### Phase 1: 基盤
 
-- [x] `edlibR` を DESCRIPTION に追加
+- [x] R プロトタイプ（一時的に edlibR）で仕様検証
 - [x] `.parse_index_layout()` / `.build_barcode_dict()` / 衝突除去
-- [ ] ユニットテスト: 分解・衝突除去（自動テストスイートは未整備）
+- [x] **C++ コアへ置換: edlib 直結、edlibR 撤去**（§15）
 
 ### Phase 2: コア分類
 
-- [x] suffix → barcode → prefix 補助アルゴリズム
-- [x] `doDemultiplex()` を edlib 版に置き換え（assignments 出力）
+- [x] suffix → barcode → prefix 補助アルゴリズム（R プロトタイプ）
+- [x] `doDemultiplex()` assignments 出力（R プロトタイプ）
 - [x] `blast_path` / 旧 CSV 列を除去
-- [x] 合成リードでの確認（truncate / fuzzy / junk）
-
+- [x] 合成リード・20k での確認
+- [x] **Rcpp + C++ edlib でホットパス再実装**
 ### Phase 3: split
 
 - [x] `splitDemultiplexReads()` 実装
@@ -532,10 +543,209 @@ flowchart TD
 
 ---
 
-## 15. 参考
+## 15. 速度問題: ONTbarcoder との違いと修正方針
+
+作成日: 2026-07-08（miao20250812 実測後）
+
+### 15.1 実測（現行実装）
+
+| 条件 | 結果 |
+|------|------|
+| 実リード 200 本・単核 | **~114 ms / read** |
+| 20k・16 core | **~7.8 分**（約 23 ms/read 実効） |
+| 1.14M・32 core 外挿 | **約 1 時間超**（単核なら ~36 時間） |
+| ONTbarcoder（体感） | **同規模で数分** |
+
+→ miaoseq 現行は **桁違いに遅い**。アルゴリズム思想は近いが、実装コストが爆発している。
+
+### 15.2 ONTbarcoder が速い理由（簡潔な処理）
+
+```
+各リードあたり:
+  1. F primer: edlib HW × 2（fwd / revcomp 先頭 window）→ 位置のみ
+  2. R primer: edlib HW × 1（残配列の末尾 window）→ 位置のみ
+  3. tag 切り出し: 文字列スライスのみ
+  4. tag 照合: Python dict の O(1) lookup（edlib なし）
+```
+
+| 項目 | ONTbarcoder |
+|------|-------------|
+| edlib 呼び出し / リード | **約 3 回**（primer 位置特定のみ） |
+| tag 照合 | **辞書のみ**（変異体は事前生成、実行時に edit distance 計算しない） |
+| 探索戦略 | F を決めてから R を探す **逐次** |
+| 方向探索 | 必要最小限（F で向き決定 → R は対応鎖） |
+| 言語 | C++ edlib via Python + 巨大 dict の高速ハッシュ |
+| I/O | チャンク分割 + 4 プロセス、サンプル FASTA 追記 |
+
+### 15.3 miaoseq 現行が遅い理由
+
+```
+各リードあたり（現行 .score_read_indices）:
+  front/rear × F/R → .match_end × 4
+    各 .match_end:
+      .find_suffix_anchor: edlib HW × 2（fwd+RC）
+      anchor 全 loc × offset ∈ {0,±1,±2,±3,±4}（最大 9）
+        毎回 .match_barcode:
+          まず named list 巨大辞書 lookup（~7.5万 keys）
+          miss 時は全 32 barcode に対し NW edlib fallback
+      毎回 prefix 用 edlib HW
+```
+
+#### ボトルネック一覧（優先度順）
+
+| # | 問題 | 実測・見積 | ONTbarcoder との差 |
+|---|------|-----------|-------------------|
+| 1 | **edlib 呼び出し過多** | 最低 **8 HW**/read（4 match_end × 2 strand）。最悪は loc×offset×NW fallback で **数十〜百回超** | ONTB は **~3 回** |
+| 2 | **両端 × F/R 同時探索** | 向き未確定のため常に 4 経路 | ONTB は F→向き決定→R **1 経路** |
+| 3 | **offset 探索ループ** | suffix indel 補正で毎回最大 9 切り出し | ONTB は **位置固定 1 回切り出し** |
+| 4 | **巨大 named list 辞書** | F 変異体 ~75,671 keys。`list[[key]]` が環境ハッシュより **約 5× 遅い**（1e5 lookup: list 0.33s vs env 0.07s） | Python `dict` はネイティブハッシュ |
+| 5 | **barcode miss 時の全件 NW** | 辞書 miss ごとに 32× edlib。失敗リードが特に遅い（20k で unassigned 多い） | ONTB は miss=即 discarded、**実行時 edlib なし** |
+| 6 | **毎ヒットで prefix edlib** | 成功時も常に追加 HW | ONTB に相当処理なし（任意なら後段のみ） |
+| 7 | **FASTQ 全読み込み** | `readDNAStringSet` で全配列をメモリ化してから chunk | ONTB は 40k chunk ストリーム |
+| 8 | **R / edlibR オーバーヘッド** | 1 HW align 自体は速い（~22 µs）が、呼び出し回数が支配的 | 呼び出し回数削減が本質 |
+
+#### コストの感覚値
+
+- HW align 1 回 ≈ 20 µs → 8 回だけなら ~0.2 ms（問題にならない）
+- 実測 114 ms/read → **align 回数以外（R ループ・巨大 list lookup・NW fallback・prefix）が大半**
+- 失敗リードが NW×32 に落ちると **数 ms〜数十 ms × 頻発**
+
+### 15.4 比較表（要約）
+
+| 観点 | ONTbarcoder | miaoseq 現行 | 望ましい miaoseq |
+|------|-------------|--------------|------------------|
+| primer/suffix 探索 | 3× edlib (C++) | 8×〜数十× edlib via R | **2〜4× edlib（C++ ホットパス内）** |
+| barcode 照合 | Py/C dict only | R named list + NW fallback | **C++ `unordered_map` lookup only** |
+| 向き処理 | 逐次決定 | 常時 4 経路 | **逐次決定（C++）** |
+| barcode 切り出し | 1 回 | offset 9 通り | **1 回**（必要時だけ ±1） |
+| prefix | 無し | 毎ヒット | **ラベル時 or rescue のみ** |
+| ループ言語 | C++/Python | **R（ボトルネック）** | **リード単位ループは C++** |
+| 並列 | 4 proc × 40k chunk | mclapply（R worker 複製） | OpenMP / chunk 並列（C++） |
+
+### 15.5 基本方針: ホットパスは C/C++、API は R
+
+実測 114 ms/read の大半は **R 上のループ・巨大 list lookup・余分な edlibR 呼び出し**。  
+ONTbarcoder が速いのは「アルゴリズムが短い」ことと、「重い部分がネイティブ」ことが両方ある。
+
+**方針:** アルゴリズム簡略化と **C/C++ 実装を同時に進める**。R だけで突き詰めない。
+
+| レイヤ | 言語 | 担当 |
+|--------|------|------|
+| 公開 API / 表出力 / パイプライン接続 | **R** | `doDemultiplex()`, `splitDemultiplexReads()`, TSV 書き出し |
+| index 分解・診断表 | **R**（可） | `.parse_index_layout()` 等。低頻度 |
+| **リード単位 demux コア** | **C++（Rcpp）** | suffix 検出・barcode 切り出し・dict lookup・向き決定 |
+| 変異体辞書 | **C++ `std::unordered_map`** | 構築は R→C++ に渡す、または C++ 側で生成 |
+| edlib | **C++ 直接リンク**（`edlib.h`） | **`edlibR` は使わない**（R 往復よりネイティブが速い） |
+| FASTQ 走査（任意） | **C++** | chunk ストリーム、全件を R に載せない |
+
+#### R に残すもの / C++ に移すもの
+
+| R のまま | C/C++ に移す（必須） |
+|----------|----------------------|
+| `doDemultiplex` 引数・戻り値・ファイル I/O 契約 | `.score_read_indices` 相当の **全リードループ** |
+| `assignments` data.frame 組み立て | `.find_suffix_anchor` / barcode extract / dict match |
+| `splitDemultiplexReads`（後段・任意） | 変異体辞書 lookup（75k keys） |
+| パラメータ検証・要約表 | revcomp・端 window 処理 |
+| | OpenMP 等のリード並列（任意） |
+
+### 15.6 修正方針（段階的）
+
+目標: **~1M reads を数分**。20k で BLAST 合意 ~97% を **≥ 95%** 維持。
+
+#### Phase S1 — アルゴリズム簡略化（仕様）+ C++ コア骨格 — **完了（2026-07-08）**
+
+実装済み（精度優先の調整あり）:
+
+1. 向き: F@front+R@rear / F@rear+R@front の両方を評価し有効ペア優先（固定 8 HW/read）
+2. offset: dict-only 切り出しで ±0..4（edlib なし）
+3. NW fallback 廃止 — barcode は dict lookup only
+4. prefix edlib は `check_prefix` / `require_prefix` 時のみ
+5. `demux_reads_cpp` + vendored `src/edlib.{h,cpp}` + OpenMP
+
+20k: **~1.3 s / 16 core**, assign **52.2%**, BLAST 合意 **96.8%**, edlib/read **8**
+
+#### Phase S2 — 辞書・I/O・並列を C++ 側で固める — **一部完了**
+
+- [x] 変異体辞書 C++ `unordered_map` + 衝突除去
+- [x] OpenMP 並列（リード単位）
+- [x] R はチャンク渡し（`chunk_size`）でコアは C++
+- [ ] FASTQ を C++ で直接ストリーム（任意・後回し）
+- [ ] `max_barcode_edit=1` を高速デフォルト候補として評価
+
+#### Phase S3 — 仕上げ — **一部完了**
+
+- [x] `n_edlib` を C++ カウンタで返す
+- [x] 20k で時間 + BLAST 合意を再計測
+- [ ] フル ~1.14M 実行・記録
+- [ ] （任意）サンプル別 FASTQ split の C++ ストリーム化
+
+### 15.7 目標処理フロー（C++ コア内）
+
+```
+read (C++)
+  → windows: front / rear
+  → edlib ×8: F/R × front/rear × (fwd+RC) で EndHit 収集
+  → extract barcode（offsets ±0..4, dict only）
+  → 向き候補を sample_map で検証 → best / ambiguous
+  → （任意）check_prefix
+→ 結果ベクトルを R に返して assignments.tsv を書く
+```
+
+実測 edlib 回数: **8 / read**（固定）。barcode に edlib 無し。  
+実測: 20k で **~0.06 ms/read**（16 core）— 目標の「数分/~1M」を満たす速度帯。
+
+### 15.8 パッケージ構成案
+
+```
+src/
+  demux_core.cpp      # リード単位 demux
+  demux_dict.cpp      # 変異体生成・衝突除去・unordered_map
+  edlib/              # Martinsos/edlib ソース同梱（必須）
+  Makevars
+R/
+  demultiplex.R       # doDemultiplex / split / 薄いラッパ（edlibR なし）
+DESCRIPTION
+  Imports: Rcpp
+  LinkingTo: Rcpp
+  # edlibR は入れない
+  SystemRequirements: C++17（目安）
+```
+
+実行時 demux は **自前 C++ + edlib** のみ。`edlibR` へのフォールバックもしない。
+
+### 15.9 受け入れ指標（速度）
+
+| 指標 | 現状 | 目標 |
+|------|------|------|
+| 単核 ms/read（実データ） | ~114 | **≤ 1〜2**（上限 ≤ 5） |
+| 20k・16 core | ~8 分 | **≤ 30 秒**（理想 ≤ 10 秒） |
+| 1.14M・32 core | 時間規模 / 未完了 | **数分**（ONTbarcoder 体感） |
+| BLAST 合意率（20k both） | 96.7% | **≥ 95%** |
+| `n_edlib_calls` / read（成功パス） | ≫ 8 | **≤ 4** |
+| コア実装言語 | R | **C++** |
+
+### 15.10 実装メモ（手を付ける順）
+
+```
+[ ] DESCRIPTION: Rcpp / LinkingTo。edlibR を Imports から削除
+[ ] src/edlib/ に edlib ソース同梱 + Makevars
+[ ] demux_dict.cpp: barcode mutant unordered_map + 衝突除去
+[ ] demux_core.cpp: 逐次 F→R、edlibAlign 直呼び、dict only、prefix 任意
+[ ] Rcpp エクスポート demux_reads_cpp
+[ ] R/demultiplex.R をラッパ化（edlibR::align を全削除）
+[ ] 20k ベンチ（時間・合意率・n_edlib）
+[ ] フル FASTQ 再実行
+```
+
+**ポイント:** 「まず R で速くしてから C++」ではなく、**仕様を固めたホットパスは最初から C++**。R はオーケストレーションに限定する。
+
+---
+
+## 16. 参考
 
 - [cursor_dev/pipeline_revise.md](pipeline_revise.md)
 - [cursor_dev/ontbarcoder_demux.md](ontbarcoder_demux.md)
 - [cursor_dev/code_reorganize_plan.md](code_reorganize_plan.md)
-- [edlibR CRAN](https://cran.r-project.org/package=edlibR)
-- 現行実装: `R/demultiplex.R`, `R/basecall.R`（廃止予定）, `R/pipeline.R`
+- [edlib (Martin Šošić)](https://github.com/Martinsos/edlib) — **採用。C++ から直接リンク**
+- edlibR — **不採用**（R プロトタイプ検証のみ。本番 demux では使わない）
+- 現行実装: `R/demultiplex.R`（edlibR プロトタイプ; C++ edlib へ置換予定）
