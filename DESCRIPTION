@@ -1,6 +1,6 @@
 Package: miaoseq
 Title: MiaoSeq - A comprehensive pipeline for sequencing data analysis
-Version: 0.1.0
+Version: 0.2.0
 Date: 2026-07-16
 Authors@R:
     person("Tomoyuki", "Furuta", , "f.tomoyuki@okayama-u.ac.jp", role = c("aut", "cre"))

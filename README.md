@@ -1,5 +1,7 @@
 # miaoseq
 
+**Version 0.2.0** — see [inst/NEWS.md](inst/NEWS.md) for the changelog.
+
 **miaoseq** is an R package for multiplexed indexed amplicon ONT sequencing (MIAOseq), focused on analysing CRISPR-Cas9 editing outcomes from Oxford Nanopore data.
 
 The workflow starts from **user-provided FASTQ** (basecall outside R), then:
