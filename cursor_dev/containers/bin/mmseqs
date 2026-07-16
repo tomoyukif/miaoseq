@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SIF="${MIAOSEQ_MMSEQS_SIF:-$ROOT/sif/mmseqs2.sif}"
-if [[ ! -f "$SIF" ]]; then
-  echo "mmseqs2 SIF missing: $SIF (run pull_sifs.sh)" >&2
-  exit 127
-fi
-exec apptainer exec --bind "/home/$USER,/tmp" "$SIF" mmseqs "$@"

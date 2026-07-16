@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SIF="${MIAOSEQ_BLAST_SIF:-$ROOT/sif/blast.sif}"
-if [[ ! -f "$SIF" ]]; then
-  echo "blast SIF missing: $SIF (run pull_sifs.sh)" >&2
-  exit 127
-fi
-exec apptainer exec --bind "/home/$USER,/tmp" "$SIF" blastn "$@"
