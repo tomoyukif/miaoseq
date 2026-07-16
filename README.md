@@ -1,300 +1,249 @@
 # miaoseq
 
-**miaoseq** is an R package that provides a comprehensive analysis pipeline for multiplexed indexed amplicon ONT sequencing (MIAOseq), enabling the analysis of CRISPR-Cas9 editing outcomes from Oxford Nanopore MinION data. The package includes tools for basecalling, demultiplexing, read alignment, and edit-calling.
+**miaoseq** is an R package for multiplexed indexed amplicon ONT sequencing (MIAOseq), focused on analysing CRISPR-Cas9 editing outcomes from Oxford Nanopore data.
+
+The workflow starts from **user-provided FASTQ** (basecall outside R), then:
+
+1. **Demultiplex** — assign reads to samples (`doDemultiplex`, edlib)
+2. **Gene assignment** — assign/orient/filter reads (`doAssignGenes`)
+3. Then either:
+   - **Editcall (primary)** — per-read PAM-window alleles (`doEditcall`)
+   - **Assemble (optional)** — clustering + consensus (`doAssembleAmplicons`) for representative amplicons / QC
 
 ## Overview
 
-The miaoseq pipeline processes raw MinION sequencing data (pod5 format) through the following steps:
-
-1. **Basecalling**: Converts raw electrical signals to DNA sequences using Dorado
-2. **Demultiplexing**: Assigns reads to samples based on index sequences using BLAST
-3. **Read Alignment**: Aligns reads to amplicon sequences using BLAST
-4. **Edit-calling**: Identifies and characterizes CRISPR-Cas9 editing outcomes
-5. **Evaluation**: Generates comprehensive statistical summaries
+```text
+[user] Dorado / other basecaller → FASTQ
+   ↓
+doDemultiplex(...)          → demultiplex/assignments.tsv
+   ↓  optional
+splitDemultiplexReads(...)  → demultiplex/by_sample/*.fq.gz
+   ↓
+doAssignGenes(...)          → amplicon_assign/gene_assignments.tsv
+   ↓
+   ├── Path B (editcall): doEditcall(gene_assign, ...) → editcall/
+   └── Path A (assemble): doAssembleAmplicons(...) → amplicon/{sample}/
+```
 
 ## Prerequisites
 
-### External Software Requirements
-
-miaoseq requires three external tools that must be installed separately from R:
-
-#### 1. Dorado (Oxford Nanopore Technologies)
-Dorado is used for basecalling raw MinION data.  
-For installation instructions, please visit:  
-https://github.com/nanoporetech/dorado
-
-#### 2. BLAST (NCBI)
-BLAST is used for sequence alignment and demultiplexing.  
-For installation instructions, please visit:  
-https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE_TYPE=BlastDocs&DOC_TYPE=Download
-
-#### 3. Samtools
-Samtools is used for BAM file processing.  
-For installation instructions, please visit:  
-https://github.com/samtools/samtools
-
-### R Package Dependencies
-
-miaoseq requires several R packages that will be installed automatically:
-
-- **Biostrings**: For DNA sequence manipulation
-- **dplyr**: For data manipulation
-- **GenomicRanges**: For genomic interval operations
-- **IRanges**: For interval operations
-- **BiocGenerics**: For generic functions
-- **pwalign**: For pairwise sequence alignment
-
+- **R ≥ 4.0** with Bioconductor packages listed in `DESCRIPTION` (`Biostrings`, `dplyr`, `GenomicRanges`, …)
+- **External tools on `PATH`:** `vsearch` (clustering) and `abpoa` (consensus) for Assemble; optional `blastn` / `mmseqs` for Reassess. See `cursor_dev/containers/` for Apptainer wrappers.
 
 ## Installation
 
-### Install miaoseq
-
 ```r
-# Install miaoseq from GitHub using devtools:
 devtools::install_github("tomoyukif/miaoseq")
-```
-
-### Load the package
-
-```r
 library(miaoseq)
 ```
 
-## Usage Guide
+## Recommended usage
 
-### Step 1: Set up your analysis
+### Inputs
 
-First, define the paths and parameters for your analysis:
+Prepare a FASTQ yourself, e.g. after Dorado basecalling and optional filtering.
 
 ```r
-# Load the package
 library(miaoseq)
 
-# Define working directories
-working_dir <- "/path/to/your/working/directory"
-out_dir <- file.path(working_dir, "output_directory_name")
-in_dir <- "/path/to/pod5/directory"  # MinION outputs raw sequence data files in a pod5 directory
+fastq <- "/path/to/basecall_filt.fq"
+out_dir <- "/path/to/run"
+genome_fn <- "/path/to/genome.fa"
+demult_dir <- file.path(out_dir, "demultiplex")
+amplicon_dir <- file.path(out_dir, "amplicon")
 
-# Reference files
-genome_fn <- '/reference/genome/sequence.fa'  # Reference genome sequence in FASTA format
-pam_list <- system.file("extdata", "agr8_pam_list.csv", package = "miaoseq")  # PAM site information installed with the package
-index_list <- system.file("extdata", "index_list.csv", package = "miaoseq")   # Index sequences for demultiplexing
-primer_list <- system.file("extdata", "amplicon_primers.csv", package = "miaoseq")  # Primer sequences
-
-# External tool paths
-dorado_path <- "/path/to/dorado"              # Path to dorado executable
-samtools_path <- "/path/to/samtools"          # Path to samtools executable
-blast_path <- "/path/to/blast/bin"            # Path to a directory containing blast executables (makeblastdb and blastn)
-
-# Analysis parameters
-n_core <- 30  # Number of CPU cores to use
+index_list <- system.file("extdata", "index_list.csv", package = "miaoseq")
+primer_list <- system.file("extdata", "amplicon_primers.csv", package = "miaoseq")
+pam_list <- system.file("extdata", "agr8_pam_list.csv", package = "miaoseq")
 ```
 
-### Step 2: Prepare amplicon database
-
-The `prepAmpliconDB()` function extracts amplicon sequences from your reference genome based on primer sequences:
+### Step 0 — Amplicon reference (optional but recommended for editcall)
 
 ```r
-# Prepare amplicon database
-amplicon_fn <- prepAmpliconDB(blast_path = blast_path,
-                              primer_list = primer_list,
-                              genome_fn = genome_fn,
-                              out_dir = out_dir,
-                              n_core = n_core)
-
-# The function returns the path to the generated amplicon FASTA file
-amplicon_fn <- file.path(out_dir, "ref/amplicon.fa")
+amplicon_fn <- prepAmpliconDB(
+  primer_list = primer_list,
+  genome_fn = genome_fn,
+  out_dir = out_dir,
+  expected_length = 500L
+)
+# Or supply curated amplicons (names must match primer gene IDs):
+# amplicon_fn <- prepAmpliconDB(
+#   primer_list = primer_list,
+#   out_dir = out_dir,
+#   amplicon_fasta = "/path/to/amplicons.fa"
+# )
+# → {out_dir}/ref/amplicon.fa
 ```
 
-**What this step does:**
-- Reads primer sequences from the CSV file
-- Uses BLAST to locate primers in the reference genome
-- Extracts amplicon sequences between primer pairs
-- Creates an indexed amplicon database for read alignment
+Uses exact primer matching (`Biostrings::matchPattern`) against the reference genome. Stops on multi-locus hits or spans longer than `2 * expected_length`. No BLAST required.
 
-### Step 3: Run the main analysis pipeline
+### Step 1 — Demultiplex
 
-The `miaoEditcall()` function orchestrates the entire analysis pipeline:
+Prefer a **1:1** index layout (each F/R ID used once) or barcodes with Hamming distance ≥ `2 * max_barcode_edit + 1`. Combinatorial plates (shared F/R IDs across wells) are allowed, but risk of a false dual hit landing in another legal well is on the user — on such layouts, a wrong dual assignment can still map to a valid well.
 
 ```r
-# Call edits using the main pipeline
-editcall_out <- miaoEditcall(in_dir = in_dir,
-                             out_dir = out_dir,
-                             dorado_path = dorado_path,
-                             samtools_path = samtools_path,
-                             blast_path = blast_path,
-                             primer_list = primer_list,
-                             pam_list = pam_list,
-                             index_list = index_list,
-                             genome_fn = genome_fn,
-                             amplicon_fn = amplicon_fn,
-                             size_sel = c(300, 450),    # Valid range of read length for edit-calling (bp)
-                             check_window = 10,         # Window size around expected cut site (bp)
-                             n_core = n_core,
-                             resume = FALSE)             # Set to TRUE to resume from previous run
+dem <- doDemultiplex(
+  fastq = fastq,
+  demult_dir = demult_dir,
+  index_list = index_list,
+  n_core = 8,
+  split_reads = FALSE,
+  allow_single_end = FALSE
+)
 ```
 
-**Pipeline steps performed by `miaoEditcall()`:**
-
-1. **Basecalling**: Converts pod5 files to FASTQ using Dorado
-2. **Quality filtering**: Removes low-quality reads and applies size selection
-3. **Demultiplexing**: Assigns reads to samples based on index sequences
-4. **Read alignment**: Aligns reads to amplicon sequences
-5. **Edit-calling**: Identifies CRISPR-Cas9 editing outcomes
-
-### Step 4: Generate evaluation report
-
-The `evalMiao()` function creates comprehensive statistical summaries:
+### Step 2 — Gene assignment
 
 ```r
-# Generate statistical summary
-evalMiao(out_dir = out_dir,
-         output_reads = FALSE)  # Set to TRUE to output sequences of undemultiplexed reads for debugging
+ga <- doAssignGenes(
+  assignments = file.path(demult_dir, "assignments.tsv"),
+  out_dir = file.path(out_dir, "amplicon_assign"),
+  fastq = fastq,
+  primer_list = primer_list,
+  amplicon_fn = amplicon_fn,
+  overwrite = TRUE
+)
 ```
 
-**Output files created:**
-- `miao_summary/read_stats.tsv`: Overall read statistics
-- `miao_summary/indexed_reads_per_gene.tsv`: Demultiplexing statistics
-- `miao_summary/aligned_reads_per_gene.tsv`: Alignment statistics
-- `editcall/editcall_summary.csv`: Final edit-calling results
+### Step 3 — Edit-calling (Path B; primary)
 
-## Parameter Configuration
+```r
+edit <- doEditcall(
+  gene_assign = ga,
+  pam_list = pam_list,
+  genome_fn = genome_fn,
+  amplicon_fn = amplicon_fn,
+  primer_list = primer_list,
+  editcall_dir = file.path(out_dir, "editcall"),
+  fastq = fastq,
+  check_window = 10,
+  anchor_bp = 5,
+  max_expand = 50,
+  min_count = 5
+)
+```
 
-### Key Parameters Explained
+Outputs: `editcall_all.csv`, `editcall_filtered.csv`, `editcall_summary.csv`, `intact_seq.fa`.
 
-- **`size_sel`**: `c(min_length, max_length)` - Range of read lengths to retain (in bp)
-  - Adjust based on your amplicon size
-  - Example: `c(300, 450)` for 300-450 bp amplicons
+### Step 3′ — Amplicon assembly (Path A; optional)
 
-- **`check_window`**: Window size around expected cut site (in bp)
-  - Defines the region where edits are searched
-  - Example: `10` searches 10 bp upstream and downstream of cut site
+```r
+amp <- doAssembleAmplicons(
+  gene_assign = ga,
+  out_dir = amplicon_dir,
+  primer_list = primer_list,
+  cluster_backend = "vsearch",
+  min_reads = 5,
+  min_cluster_reads = 5,
+  # min_cluster_purity = 0.8,  # default NULL (disabled); set for strict filtering
+  # assembly_backend = "overlap_graph",  # optional graph-based modal paths
+  overwrite = TRUE
+)
+```
 
-- **`n_core`**: Number of CPU cores for parallel processing
-  - Higher values speed up analysis but require more memory
-  - Recommended: 20-30 cores for typical datasets
+Per sample, assemble also writes `unassigned_to_cluster.tsv` (U1 membership for Phase H).
 
-- **`resume`**: Whether to resume from previous run
-  - Set to `TRUE` if analysis was interrupted
-  - Skips completed steps and continues from where it left off
+### Step 2c — Reassess assemblies (Path A diagnostic; optional)
 
-### Input File Formats
+```r
+re <- doReassessAssemblies(
+  amplicon_out = amp,
+  gene_assign = ga,
+  out_dir = file.path(out_dir, "amplicon_reassess"),
+  primer_list = primer_list,
+  # backend = "edlib",  # default; independent edit-distance QC of vsearch clustering
+  consensus_merge_max_edit = 12L,  # Q1 highlight threshold only (no auto-merge)
+  read_assign_max_edit = 12L,
+  overwrite = TRUE
+)
+# → summary_by_sample.tsv (long; one row per sample×backend)
+# → summary_compare.tsv (wide; reassignable_frac / near-dup groups side-by-side)
+# → {backend}/{sample}/consensus_pairwise.tsv
+# → {backend}/{sample}/consensus_near_duplicate_groups.tsv  (review only)
+# → {backend}/{sample}/unassigned_to_consensus.tsv
+# Does not modify amplicon/ and does not write merged sequences.
+```
 
-#### Primer List (`primer_list`)
-CSV file with two columns:
-- Column 1: Primer ID (must end with "_F" for forward, "_R" for reverse)
-- Column 2: Primer sequence
+### Reporting (optional)
 
-#### Index List (`index_list`)
-CSV file with five columns:
-- Column 1: Index pair ID
-- Column 2: Forward index ID
-- Column 3: Forward index sequence
-- Column 4: Reverse index ID
-- Column 5: Reverse index sequence
+```r
+evalMiao(out_dir, output_reads = FALSE)
+# → miao_summary/read_stats.tsv, indexed_reads_per_index.tsv, gene_reads_per_gene.tsv
 
-#### PAM List (`pam_list`)
-CSV file with three columns:
-- Column 1: Target gene name
-- Column 2: Chromosome number
-- Column 3: PAM position
+editViewer(out_dir, sample_list = "/path/to/sample_list.csv")
+# → editviewer/edit_viewer_plate*.pdf
+```
 
-## Output Files
+`sample_list` is a headerless CSV with **plate well coordinates**, not barcode/index sequences:
 
-The analysis creates several output directories:
+```text
+index_pair_id,sample_name,plate_id,row_id,col_id
+miaoBC0001,sample01,plate1,A,1
+miaoBC0009,sample02,plate1,A,2
+```
 
-- **`basecall/`**: Basecalling results and quality-filtered reads
-- **`demultiplex/`**: Demultiplexing results and sample assignments
-- **`align/`**: Read alignment results
-- **`editcall/`**: Edit-calling results and summaries
-- **`ref/`**: Reference files and amplicon database
-- **`miao_summary/`**: Statistical summaries and reports
+- `row_id`: `A`–`H`
+- `col_id`: `1`–`12`
+
+Do **not** pass `index_list.csv` (barcode file) as `sample_list`.
+
+## Input file formats
+
+#### Primer list (`primer_list`)
+CSV, two columns: primer ID (`*_F` / `*_R`), sequence.
+
+#### Index list (`index_list`)
+CSV, five columns: index pair ID, F index ID, F sequence, R index ID, R sequence.
+On combinatorial layouts, a spurious dual barcode call may still match another plate well; prefer 1:1 pairing or high inter-barcode distance when cross-talk must be minimized.
+
+#### PAM list (`pam_list`)
+CSV (no header): (1) gene ID matching primer / `amplicon.fa` names, (2) chromosome/seqname matching genome FASTA headers **exactly** (no automatic `chr` / zero-pad), (3) PAM start (1-based), (4) optional guide ID (required when a gene has multiple rows), (5) optional strand `+`/`-` (Cas9: `+` → cut = pam−3, `-` → cut = pam+3 on genome; missing → cut = pam start).
+Multiple guides on one amplicon: same gene ID + distinct guide column — Guide-level alleles (Plan A) plus dual-cut excision (`editcall_joint*.csv`, Plan A′). See `cursor_dev/pipeline_revise.md` §7.3–7.4 / §18.
+
+#### Assemble column note (`fraction_bucket`)
+In `cluster_counts.tsv`, `fraction_bucket` is the fraction of reads in the **sample × gene bucket**, not of all demultiplexed reads for the sample (formerly `fraction_sample`). `fraction` is within that gene after clustering. Minor clusters below `min_cluster_reads` (default 5) are excluded; `max_clusters` defaults to `Inf` (no top-N truncation).
+
+#### Clustering identity note
+Assemble clustering uses **vsearch** only (`--cluster_fast`, `--iddef 2`) with `--id = min_cluster_identity` (default **0.95**). Consensus is **abpoa** (FASTA, no quality weighting, no racon polish). `clusters.fasta` holds member reads (`>{read_id} {cluster_id}`).
+
+#### Pathway roles
+**Assemble** restores full-length amplicon representatives (within-cluster variation is collapsed). **Editcall** estimates local edit patterns around known cut sites. For diverse loci such as 16S, use Assemble for global composition; do not treat Editcall local windows as a substitute for full-insert clustering. Residual uncertainty in ONT amplicon consensus is shared across tools and has no complete solution.
+
+#### Reassess backend selection
+Default `backend = "edlib"` provides an independent exact edit-distance evaluation of clustering results — a different perspective from vsearch's %identity used during clustering. Additional backends (`"vsearch"`, `"blastn"`, `"mmseqs"`) can be added for cross-metric comparison (`summary_compare.tsv`). Use `fraction` (not `fraction_bucket`) when ranking cluster importance within a gene.
+
+## Output layout
+
+```text
+{out_dir}/
+  ref/
+    amplicon.fa
+  demultiplex/
+    assignments.tsv
+    summary_by_sample.tsv
+    by_sample/                 # optional
+  amplicon/
+    summary_by_sample.tsv
+    gene_assignments.tsv
+    {sample_id}/
+      consensus.fasta
+      cluster_counts.tsv
+      stats.tsv
+  editcall/
+    editcall_summary.csv
+    ...
+  miao_summary/              # evalMiao
+  editviewer/                # editViewer PDFs
+```
 
 ## Troubleshooting
 
-### Common Issues
+1. **Empty amplicon clusters** — check `skip_reason` in `stats.tsv` (`low_gene_reads`, `no_gene_assigned`, `no_clusters`).
+2. **Slow resolve without `by_sample`** — provide `sample_fastq_dir`, or accept a single FASTQ pass.
+3. **Tool binaries not found** — Assemble requires `vsearch` and `abpoa` on `PATH`. Use `cursor_dev/containers/pull_sifs.sh` to pull Apptainer images and add `cursor_dev/containers/bin/` to `PATH`. Reassess optionally uses `blastn` / `mmseqs`.
 
-1. **External tool not found**
-   - Ensure all external tools (dorado, blast, samtools) are installed and in your PATH
-   - Check that the paths specified in the script are correct
+## Further documentation
 
-2. **Memory issues**
-   - Reduce `n_core` parameter if running out of memory
-   - Ensure sufficient disk space for intermediate files
-
-3. **BLAST errors**
-   - Verify that BLAST executables (`makeblastdb`, `blastn`) are accessible
-   - Check that input sequences are in proper FASTA format
-
-4. **Demultiplexing failures**
-   - Verify index sequences in your index list file
-   - Check that index sequences are present in your reads
-
-### Getting Help
-
-For issues or questions:
-1. Check the error messages carefully
-2. Verify all input files are properly formatted
-3. Ensure external tools are correctly installed
-4. Check that you have sufficient computational resources
-
-## Example Workflow
-
-Here's a complete example workflow:
-
-```r
-# Load package
-library("miaoseq")
-
-# Set up paths
-working_dir <- "/home/user/analysis"
-out_dir <- file.path(working_dir, "miaoseq_results")
-# The 'in_dir' variable should point to the directory containing your MinION raw data in pod5 format.
-# Typically, after a MinION run, pod5 files are located in a subdirectory named 'pod5'.
-in_dir <- "/data/minion_run/pod5"
-genome_fn <- "/reference/genome.fa"
-
-# External tool paths
-dorado_path <- "/usr/local/bin/dorado"
-samtools_path <- "/usr/local/bin/samtools"
-blast_path <- "/usr/local/bin"
-
-# Reference files
-pam_list <- system.file("extdata", "agr8_pam_list.csv", package = "miaoseq") 
-index_list <- system.file("extdata", "index_list.csv", package = "miaoseq") 
-primer_list <- system.file("extdata", "amplicon_primers.csv", package = "miaoseq")
-
-# Analysis parameters
-n_core <- 30
-size_sel <- c(300, 450)
-check_window <- 10
-
-# Run analysis
-amplicon_fn <- prepAmpliconDB(blast_path = blast_path,
-                              primer_list = "primers.csv",
-                              genome_fn = genome_fn,
-                              out_dir = out_dir,
-                              n_core = n_core)
-
-editcall_out <- miaoEditcall(in_dir = in_dir,
-                             out_dir = out_dir,
-                             dorado_path = dorado_path,
-                             samtools_path = samtools_path,
-                             blast_path = blast_path,
-                             primer_list = "primers.csv",
-                             pam_list = "pam_sites.csv",
-                             index_list = "indices.csv",
-                             genome_fn = genome_fn,
-                             amplicon_fn = amplicon_fn,
-                             size_sel = size_sel,
-                             check_window = check_window,
-                             n_core = n_core,
-                             resume = FALSE)
-
-# Generate summary
-evalMiao(out_dir = out_dir, output_reads = FALSE)
-```
-
-> **Typical running time and memory usage:**  
-> On a standard workstation using 30 CPU cores, processing the output read data from a single Oxford Nanopore Flongle cell typically takes about **1 hour**. Actual running time may vary depending on hardware, data size, and parameter settings.  
-> **Memory usage:** In a typical run, miaoseq required approximately **15–20 GB of RAM**. Please ensure your system has sufficient memory available for large datasets.
+- `cursor_dev/pipeline_revise.md` — pipeline redesign
+- `cursor_dev/demux_revise.md` — demultiplex design
+- `cursor_dev/ampliconresolve_plan.md` — amplicon resolve phases

@@ -6,9 +6,9 @@
 #'
 #' Classifies multiplexed FASTQ reads into samples using a two-step procedure
 #' implemented in C++ (edlib HW for adapter **suffix** anchors; barcode matching
-#' via a precomputed mutant dictionary). Optional prefix checks are off by
-#' default on the hot path. Primary outputs are assignment tables; sample FASTQ
-#' files are written only when `split_reads = TRUE` (via [splitDemultiplexReads()]).
+#' via a precomputed mutant dictionary). Primary outputs are assignment tables;
+#' sample FASTQ files are written only when `split_reads = TRUE`
+#' (via [splitDemultiplexReads()]).
 #'
 #' @param fastq Character vector of FASTQ paths (`.fq` / `.fastq`, optionally `.gz`).
 #' @param demult_dir Output directory for demultiplex results.
@@ -21,19 +21,22 @@
 #' @param n_core Number of OpenMP threads for the C++ core (`1` disables).
 #' @param end_window Bases from each read end to search for anchors.
 #' @param max_anchor_edit Maximum edit distance for suffix detection.
-#' @param max_prefix_edit Maximum edit distance for optional prefix checks.
 #' @param max_barcode_edit Maximum edit distance for barcode mutant dictionary.
-#' @param require_prefix If `TRUE`, reject reads without a detectable prefix.
-#' @param check_prefix If `TRUE`, run optional prefix labeling on every hit
-#'   (slower). Ignored when `require_prefix = TRUE` (prefix is always checked).
-#' @param require_unique_pair Kept for API compatibility (pair map is unique by construction).
 #' @param allow_revcomp If `TRUE`, also search reverse-complement windows.
+#' @param allow_single_end If `TRUE`, assign reads when only one end (F or R)
+#'   yields a unique barcode hit. Allowed only when every F and every R barcode
+#'   ID appears in exactly one index pair (non-combinatorial layout). On
+#'   combinatorial plates (shared F/R IDs across wells), the run stops at
+#'   startup. Conflicting hits on both ends are rejected as `ambiguous_ends`.
 #' @param split_reads If `TRUE`, call [splitDemultiplexReads()] after assignment.
 #' @param compress Passed to [splitDemultiplexReads()] when `split_reads = TRUE`.
 #' @param chunk_size Reads per C++ batch (streaming to limit peak memory).
+#' @param stats_unassign If `TRUE`, write `stats_unassigned.tsv` summarizing
+#'   unassigned read counts by `reason`.
 #'
 #' @return A list with `assignments`, `summary`, `unassigned`, `demult_dir`,
-#'   and `n_edlib` (total edlib calls in the C++ core).
+#'   and `n_edlib` (total edlib calls in the C++ core). When
+#'   `stats_unassign = TRUE`, also includes `stats_unassigned`.
 #'
 #' @export
 #' @useDynLib miaoseq, .registration = TRUE
@@ -48,15 +51,13 @@ doDemultiplex <- function(fastq,
                           n_core = 1,
                           end_window = 120,
                           max_anchor_edit = 10,
-                          max_prefix_edit = 5,
                           max_barcode_edit = 2,
-                          require_prefix = FALSE,
-                          check_prefix = FALSE,
-                          require_unique_pair = TRUE,
                           allow_revcomp = TRUE,
+                          allow_single_end = FALSE,
                           split_reads = FALSE,
                           compress = TRUE,
-                          chunk_size = 20000) {
+                          chunk_size = 20000,
+                          stats_unassign = FALSE) {
     if (!dir.exists(demult_dir)) {
         dir.create(demult_dir, recursive = TRUE, showWarnings = FALSE)
     }
@@ -66,6 +67,7 @@ doDemultiplex <- function(fastq,
     }
 
     layout <- .parse_index_layout(index_list)
+    .assert_single_end_allowed(layout, allow_single_end)
     sample_map <- .load_sample_map(sample_list, layout$sample_map)
     design <- .validate_barcode_design(layout, max_barcode_edit)
 
@@ -78,16 +80,27 @@ doDemultiplex <- function(fastq,
                                      as.integer(max_barcode_edit))
 
     .write_index_layout(layout, file.path(demult_dir, "index_layout.tsv"))
+    .conflict_rows <- function(side, diag) {
+        n <- length(diag$conflict_mutants)
+        if (!n) {
+            return(data.frame(
+                side = character(),
+                mutant = character(),
+                parents = character(),
+                stringsAsFactors = FALSE
+            ))
+        }
+        data.frame(
+            side = rep(side, n),
+            mutant = diag$conflict_mutants,
+            parents = diag$conflict_parents,
+            stringsAsFactors = FALSE
+        )
+    }
     write.table(
         rbind(
-            data.frame(side = "F",
-                       mutant = f_diag$conflict_mutants,
-                       parents = f_diag$conflict_parents,
-                       stringsAsFactors = FALSE),
-            data.frame(side = "R",
-                       mutant = r_diag$conflict_mutants,
-                       parents = r_diag$conflict_parents,
-                       stringsAsFactors = FALSE)
+            .conflict_rows("F", f_diag),
+            .conflict_rows("R", r_diag)
         ),
         file.path(demult_dir, "barcode_conflicts.tsv"),
         sep = "\t", quote = FALSE, row.names = FALSE
@@ -108,11 +121,9 @@ doDemultiplex <- function(fastq,
             n_core = n_core,
             end_window = end_window,
             max_anchor_edit = max_anchor_edit,
-            max_prefix_edit = max_prefix_edit,
             max_barcode_edit = max_barcode_edit,
-            require_prefix = require_prefix,
-            check_prefix = check_prefix || require_prefix,
             allow_revcomp = allow_revcomp,
+            allow_single_end = allow_single_end,
             chunk_size = chunk_size
         )
         assign_parts[[fq]] <- part$assignments
@@ -123,6 +134,15 @@ doDemultiplex <- function(fastq,
     assignments <- .rbind_or_empty(assign_parts, .empty_assignments())
     unassigned <- .rbind_or_empty(un_parts, .empty_unassigned())
     summary_df <- .summarize_assignments(assignments)
+    stats_unassigned_df <- NULL
+    if (isTRUE(stats_unassign)) {
+        stats_unassigned_df <- .stats_unassign_demultiplex(unassigned)
+        write.table(
+            stats_unassigned_df,
+            file.path(demult_dir, "stats_unassigned.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE
+        )
+    }
     .write_demultiplex_tables(demult_dir, assignments, summary_df, unassigned)
 
     if (isTRUE(split_reads) && nrow(assignments) > 0) {
@@ -139,7 +159,8 @@ doDemultiplex <- function(fastq,
         summary = summary_df,
         unassigned = unassigned,
         demult_dir = demult_dir,
-        n_edlib = n_edlib_total
+        n_edlib = n_edlib_total,
+        stats_unassigned = stats_unassigned_df
     )
 }
 
@@ -269,6 +290,32 @@ splitDemultiplexReads <- function(fastq,
 }
 
 #' @keywords internal
+#' Stop early when allow_single_end is incompatible with combinatorial indexes.
+.assert_single_end_allowed <- function(layout, allow_single_end) {
+    if (!isTRUE(allow_single_end)) {
+        return(invisible(NULL))
+    }
+    sm <- layout$sample_map
+    f_reuse <- any(duplicated(sm$f_index_id))
+    r_reuse <- any(duplicated(sm$r_index_id))
+    if (!f_reuse && !r_reuse) {
+        return(invisible(NULL))
+    }
+    f_max <- max(as.integer(table(sm$f_index_id)))
+    r_max <- max(as.integer(table(sm$r_index_id)))
+    msg <- paste0(
+        "allow_single_end=TRUE is not allowed for combinatorial index layouts ",
+        "where the same F and/or R barcode ID is reused across multiple wells. ",
+        "Detected max F reuse=", f_max, ", max R reuse=", r_max, ". ",
+        "A single-end barcode hit cannot uniquely identify a sample on such ",
+        "plates; refusing to run to avoid silent cross-sample assignment. ",
+        "Use allow_single_end=FALSE, or supply a 1:1 (non-reused) index_list."
+    )
+    warning(msg, call. = FALSE)
+    stop(msg, call. = FALSE)
+}
+
+#' @keywords internal
 .validate_barcode_design <- function(layout, max_barcode_edit) {
     # Light check without edlibR: Hamming on equal-length barcodes as lower bound proxy
     f_min <- .min_hamming(layout$f_barcodes)
@@ -339,9 +386,9 @@ splitDemultiplexReads <- function(fastq,
 
 #' @keywords internal
 .demultiplex_fastq_cpp <- function(fq, layout, sample_map, n_core,
-                                   end_window, max_anchor_edit, max_prefix_edit,
-                                   max_barcode_edit, require_prefix, check_prefix,
-                                   allow_revcomp, chunk_size) {
+                                   end_window, max_anchor_edit,
+                                   max_barcode_edit,
+                                   allow_revcomp, allow_single_end, chunk_size) {
     reads <- .read_fastq_seqs(fq)
     n <- length(reads)
     if (n < 1) {
@@ -364,8 +411,6 @@ splitDemultiplexReads <- function(fastq,
             ids = ids[s:e],
             f_suffix = layout$f_suffix,
             r_suffix = layout$r_suffix,
-            f_prefix = layout$f_prefix,
-            r_prefix = layout$r_prefix,
             f_barcodes = unname(layout$f_barcodes),
             f_barcode_names = names(layout$f_barcodes),
             r_barcodes = unname(layout$r_barcodes),
@@ -376,11 +421,9 @@ splitDemultiplexReads <- function(fastq,
             sample_ids = sample_map$sample_id,
             end_window = as.integer(end_window),
             max_anchor_edit = as.integer(max_anchor_edit),
-            max_prefix_edit = as.integer(max_prefix_edit),
             max_barcode_edit = as.integer(max_barcode_edit),
-            require_prefix = isTRUE(require_prefix),
-            check_prefix = isTRUE(check_prefix),
             allow_revcomp = isTRUE(allow_revcomp),
+            allow_single_end = isTRUE(allow_single_end),
             n_core = as.integer(n_core)
         )
         n_edlib <- n_edlib + res$n_edlib
@@ -397,11 +440,7 @@ splitDemultiplexReads <- function(fastq,
                 barcode_edit_f = res$barcode_edit_f[assigned],
                 barcode_edit_r = res$barcode_edit_r[assigned],
                 match_class = res$match_class[assigned],
-                anchor_status = res$anchor_status[assigned],
-                prefix_edit_f = ifelse(res$prefix_edit_f[assigned] < 0, NA_integer_,
-                                       res$prefix_edit_f[assigned]),
-                prefix_edit_r = ifelse(res$prefix_edit_r[assigned] < 0, NA_integer_,
-                                       res$prefix_edit_r[assigned]),
+                assign_mode = res$assign_mode[assigned],
                 stringsAsFactors = FALSE
             )
         }
@@ -450,9 +489,7 @@ splitDemultiplexReads <- function(fastq,
         barcode_edit_f = integer(),
         barcode_edit_r = integer(),
         match_class = character(),
-        anchor_status = character(),
-        prefix_edit_f = integer(),
-        prefix_edit_r = integer(),
+        assign_mode = character(),
         stringsAsFactors = FALSE
     )
 }
@@ -477,6 +514,75 @@ splitDemultiplexReads <- function(fastq,
 }
 
 #' @keywords internal
+.stats_unassign_reason_table <- function(reasons, scope, sample_id = NA_character_) {
+    reasons <- as.character(reasons)
+    reasons <- reasons[!is.na(reasons) & nzchar(reasons)]
+    if (!length(reasons)) {
+        return(data.frame(
+            scope = character(),
+            sample_id = character(),
+            reason = character(),
+            n = integer(),
+            fraction = numeric(),
+            stringsAsFactors = FALSE
+        ))
+    }
+    tab <- sort(table(reasons), decreasing = TRUE)
+    n_total <- sum(tab)
+    data.frame(
+        scope = scope,
+        sample_id = if (is.na(sample_id)) "" else sample_id,
+        reason = names(tab),
+        n = as.integer(tab),
+        fraction = as.numeric(tab) / n_total,
+        stringsAsFactors = FALSE,
+        row.names = NULL
+    )
+}
+
+#' @keywords internal
+.stats_unassign_demultiplex <- function(unassigned) {
+    parts <- list(
+        .stats_unassign_reason_table(unassigned$reason, scope = "overall")
+    )
+    if ("source_file" %in% names(unassigned) && nrow(unassigned) > 0L) {
+        by_file <- split(unassigned$reason, unassigned$source_file)
+        parts <- c(
+            parts,
+            lapply(names(by_file), function(src) {
+                .stats_unassign_reason_table(by_file[[src]], scope = "source_file", sample_id = src)
+            })
+        )
+    }
+    do.call(rbind, parts)
+}
+
+#' @keywords internal
+.stats_unassign_amplicon <- function(gene_assignments) {
+    if (nrow(gene_assignments) < 1L) {
+        return(.stats_unassign_reason_table(character(), scope = "overall"))
+    }
+    ok_status <- "assigned"
+    is_unassigned <- is.na(gene_assignments$gene_id) |
+        gene_assignments$gene_id == "" |
+        !(gene_assignments$assign_status %in% ok_status)
+    un_df <- gene_assignments[is_unassigned, , drop = FALSE]
+    parts <- list(
+        .stats_unassign_reason_table(un_df$assign_status, scope = "overall")
+    )
+    if (nrow(un_df) > 0L && "sample_id" %in% names(un_df)) {
+        by_sample <- split(un_df$assign_status, un_df$sample_id)
+        parts <- c(
+            parts,
+            lapply(names(by_sample), function(sid) {
+                .stats_unassign_reason_table(by_sample[[sid]], scope = "sample", sample_id = sid)
+            })
+        )
+    }
+    do.call(rbind, parts)
+}
+
+#' @keywords internal
 .summarize_assignments <- function(assignments) {
     if (nrow(assignments) < 1) {
         return(data.frame(
@@ -485,9 +591,7 @@ splitDemultiplexReads <- function(fastq,
             n_reads = integer(),
             n_complete = integer(),
             n_fuzzy = integer(),
-            n_high_confidence = integer(),
-            n_partial_anchor = integer(),
-            n_rescued = integer(),
+            n_single_end = integer(),
             stringsAsFactors = FALSE
         ))
     }
@@ -499,9 +603,7 @@ splitDemultiplexReads <- function(fastq,
             n_reads = nrow(df),
             n_complete = sum(df$match_class == "complete_match"),
             n_fuzzy = sum(df$match_class == "fuzzy_match"),
-            n_high_confidence = sum(df$anchor_status == "high_confidence"),
-            n_partial_anchor = sum(df$anchor_status == "partial_anchor"),
-            n_rescued = sum(df$anchor_status == "rescued"),
+            n_single_end = sum(df$assign_mode %in% c("single_f", "single_r")),
             stringsAsFactors = FALSE
         )
     }))

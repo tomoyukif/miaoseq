@@ -4,35 +4,28 @@
 \alias{editViewer}
 \title{Visualize edit-calling results per plate as PDF heatmaps}
 \usage{
-editViewer(out_dir, sample_list, onefile = FALSE, fill_plate = TRUE)
+editViewer(out_dir, sample_list = NULL, onefile = FALSE, fill_plate = TRUE)
 }
 \arguments{
 \item{out_dir}{Output directory of a completed run. Must contain
-\code{editcall/editcall_summary.csv} with the same structure as \code{edit_result}.
-PDFs will be saved into \code{file.path(out_dir, "editviewer")}.}
+\code{editcall/editcall_summary.csv}. PDFs are written to \verb{editviewer/}.}
 
-\item{sample_list}{Path to a CSV file mapping index pairs to sample and plate
-layout. This file is expected to have NO header and exactly five columns in
-this order:
-\enumerate{
-\item \code{index_pair_id}, 2) \code{sample_name}, 3) \code{plate_id}, 4) \code{row_id},
-\item \code{col_id}. Example rows:
-}
+\item{sample_list}{Path to a headerless CSV with five columns:
+\code{index_pair_id}, sample name, plate id, row id (\code{A}–\code{H}), column id (\code{1}–\code{12}).
+This must be a plate layout file, not \code{index_list.csv}. When \code{NULL}, layout
+is taken from \code{editcall_summary.csv} only if \code{row_id} / \code{col_id} already
+look like well coordinates.}
 
-miaoBC0001,Sample_A,1,A,1
-miaoBC0002,Sample_B,1,A,2
+\item{onefile}{If \code{TRUE}, draw plots in one PDF file, otherwise separate PDF files.}
 
-The values are used to annotate plots (sample name) and to facet by plate
-and well coordinates (row, col).}
-
-\item{onefile}{If TRUE, draw plots in one PDF file, otherwise separate PDF files.}
-
-\item{fill_plate}{If TRUE, fill missing wells on the plate layout.}
+\item{fill_plate}{If \code{TRUE}, fill missing wells on the plate layout.}
 }
 \value{
 Invisibly, a character vector of generated PDF file paths.
 }
 \description{
-This function takes the edit-calling summary and produces per-plate PDF
-heatmaps summarizing genotype categories per target for each sample well.
+Reads \code{editcall/editcall_summary.csv} and draws per-plate genotype heatmaps.
+Genotype labels (\code{ref} / \code{sub} / \code{delN} / \code{insN} / \code{indelD-I})
+are parsed structurally; SNP (\code{sub}) is never treated as frameshift.
+In-frame classes use net indel length mod 3 (not CDS phase).
 }

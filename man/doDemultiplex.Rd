@@ -12,15 +12,13 @@ doDemultiplex(
   n_core = 1,
   end_window = 120,
   max_anchor_edit = 10,
-  max_prefix_edit = 5,
   max_barcode_edit = 2,
-  require_prefix = FALSE,
-  check_prefix = FALSE,
-  require_unique_pair = TRUE,
   allow_revcomp = TRUE,
+  allow_single_end = FALSE,
   split_reads = FALSE,
   compress = TRUE,
-  chunk_size = 20000
+  chunk_size = 20000,
+  stats_unassign = FALSE
 )
 }
 \arguments{
@@ -42,33 +40,31 @@ If omitted, \code{sample_id} equals \code{index_pair_id}.}
 
 \item{max_anchor_edit}{Maximum edit distance for suffix detection.}
 
-\item{max_prefix_edit}{Maximum edit distance for optional prefix checks.}
-
 \item{max_barcode_edit}{Maximum edit distance for barcode mutant dictionary.}
 
-\item{require_prefix}{If \code{TRUE}, reject reads without a detectable prefix.}
-
-\item{check_prefix}{If \code{TRUE}, run optional prefix labeling on every hit
-(slower). Ignored when \code{require_prefix = TRUE} (prefix is always checked).}
-
-\item{require_unique_pair}{Kept for API compatibility (pair map is unique by construction).}
-
 \item{allow_revcomp}{If \code{TRUE}, also search reverse-complement windows.}
+
+\item{allow_single_end}{If \code{TRUE}, assign reads when only one end (F or R)
+yields a unique barcode hit. Allowed only when every F and every R barcode
+ID appears in exactly one index pair. On combinatorial plates the run stops
+at startup. Conflicting hits on both ends are rejected as \code{ambiguous_ends}.}
 
 \item{split_reads}{If \code{TRUE}, call \code{\link[=splitDemultiplexReads]{splitDemultiplexReads()}} after assignment.}
 
 \item{compress}{Passed to \code{\link[=splitDemultiplexReads]{splitDemultiplexReads()}} when \code{split_reads = TRUE}.}
 
 \item{chunk_size}{Reads per C++ batch (streaming to limit peak memory).}
+
+\item{stats_unassign}{If \code{TRUE}, write \code{stats_unassigned.tsv} summarizing
+unassigned read counts by \code{reason}.}
 }
 \value{
 A list with \code{assignments}, \code{summary}, \code{unassigned}, \code{demult_dir},
-and \code{n_edlib} (total edlib calls in the C++ core).
+and \code{n_edlib} (total edlib calls in the C++ core). When
+\code{stats_unassign = TRUE}, also includes \code{stats_unassigned}.
 }
 \description{
 Classifies multiplexed FASTQ reads into samples using a two-step procedure
 implemented in C++ (edlib HW for adapter \strong{suffix} anchors; barcode matching
-via a precomputed mutant dictionary). Optional prefix checks are off by
-default on the hot path. Primary outputs are assignment tables; sample FASTQ
-files are written only when \code{split_reads = TRUE} (via \code{\link[=splitDemultiplexReads]{splitDemultiplexReads()}}).
+via a precomputed mutant dictionary).
 }

@@ -1,11 +1,12 @@
 Package: miaoseq
 Title: MiaoSeq - A comprehensive pipeline for sequencing data analysis
-Version: 0.0.5
-Date: 2025-12-29
+Version: 0.1.0
+Date: 2026-07-16
 Authors@R:
     person("Tomoyuki", "Furuta", , "f.tomoyuki@okayama-u.ac.jp", role = c("aut", "cre"))
-Description: MiaoSeq provides a comprehensive pipeline for sequencing data
-    analysis including demultiplexing, alignment, and edit calling.
+Description: MiaoSeq provides a pipeline for multiplexed ONT amplicon
+    sequencing: demultiplexing, per-sample amplicon resolution, and
+    edit-calling from user-provided FASTQ.
 License: `use_mit_license()`
 Encoding: UTF-8
 Imports:
@@ -25,7 +26,7 @@ LinkingTo:
     Rcpp
 Depends:
     R (>= 4.0.0)
-SystemRequirements: C++17
+SystemRequirements: C++17, zlib; vsearch, abpoa (Assemble); blastn, mmseqs2 optional (Reassess)
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
 Config/roxygen2/version: 8.0.0

@@ -4,16 +4,19 @@
 \alias{evalMiao}
 \title{Evaluate MIAO results}
 \usage{
-evalMiao(out_dir, output_reads)
+evalMiao(out_dir, output_reads = FALSE)
 }
 \arguments{
-\item{out_dir}{The output directory where MIAO results are stored.}
+\item{out_dir}{Output directory containing \verb{demultiplex/}, and optionally
+\verb{amplicon_assign/}, \verb{amplicon/}, and \verb{editcall/} subdirectories.}
 
-\item{output_reads}{Logical. If TRUE, outputs the sequences of non-indexed aligned reads to a FASTA file.}
+\item{output_reads}{If \code{TRUE}, write read IDs that received no gene assignment
+to \code{miao_summary/amplicon_unassigned_read_ids.tsv}.}
 }
 \value{
-A summary report saved in the output directory.
+Invisibly, the path to \verb{miao_summary/}.
 }
 \description{
-This function evaluates the results of the MIAO pipeline and generates a summary report.
+Summarize demultiplex, amplicon resolve, and edit-calling outputs
+under a single run directory.
 }

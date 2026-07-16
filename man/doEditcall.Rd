@@ -2,32 +2,86 @@
 % Please edit documentation in R/editcall.R
 \name{doEditcall}
 \alias{doEditcall}
-\title{Evaluate alignments and perform edit-calling}
+\title{Perform edit-calling from gene-assigned reads}
 \usage{
 doEditcall(
-  demult_out,
-  align_out,
+  gene_assign = NULL,
+  amplicon_out = NULL,
+  pam_list,
+  genome_fn,
+  amplicon_fn,
+  primer_list,
   editcall_dir,
   sample_list = NULL,
-  strict = FALSE
+  check_window = 10L,
+  anchor_bp = 5L,
+  max_expand = 50L,
+  min_span_bp = 30L,
+  excision_tol_bp = 20L,
+  min_count = 5L,
+  fastq = NULL,
+  sample_fastq_dir = NULL,
+  max_primer_edit = 5L,
+  n_core = 1L
 )
 }
 \arguments{
-\item{demult_out}{A data frame summarizing the demultiplexing results.}
+\item{gene_assign}{\code{GeneAssignResult} from \code{\link[=doAssignGenes]{doAssignGenes()}}, path to
+\verb{amplicon_assign/} or \code{gene_assignments.tsv}, or a data.frame. Required
+unless recoverable from \code{amplicon_out}.}
 
-\item{align_out}{A data frame summarizing the alignment results.}
+\item{amplicon_out}{Optional migration fallback: result list from
+\code{\link[=doAssembleAmplicons]{doAssembleAmplicons()}} or path that contains \code{gene_assignments.tsv}.}
 
-\item{editcall_dir}{Path to the output directory where edit-calling results will be saved.}
+\item{pam_list}{Path to a CSV file with PAM / cut-site coordinates (no header).
+Columns: (1) gene ID matching primer / amplicon names, (2) chromosome /
+seqname matching \code{genome_fn} FASTA headers exactly, (3) PAM start (1-based),
+(4) optional guide ID (required when a gene has multiple rows),
+(5) optional strand \code{+} / \code{-} (Cas9 cut offset on genome: \code{+} → pam−3,
+\code{-} → pam+3; missing → cut = pam start).}
 
-\item{sample_list}{Optional path to a CSV file mapping index pairs to sample information.
-If provided, adds sample names and total read counts to the summary.}
+\item{genome_fn}{Path to the reference genome FASTA.}
 
-\item{strict}{Logical. If TRUE, apply strict filtering on barcode and alignment positions.}
+\item{amplicon_fn}{Path to the amplicon reference FASTA from \code{\link[=prepAmpliconDB]{prepAmpliconDB()}}.}
+
+\item{primer_list}{Path to primer CSV (\code{primer_id}, \code{seq} with \verb{_F} / \verb{_R} suffixes).}
+
+\item{editcall_dir}{Output directory for edit-calling tables.}
+
+\item{sample_list}{Optional CSV mapping \code{index_pair_id} to plate layout (no header).}
+
+\item{check_window}{Window size (bp) around the cut site for initial edit
+extraction (adaptive expansion starts from this window).}
+
+\item{anchor_bp}{Consecutive identity (bp) required at each end of the edit
+window versus the reference. Ends that fail this check are expanded
+outward (see section 15.7 in \code{cursor_dev/pipeline_revise.md}).}
+
+\item{max_expand}{Maximum additional bp to expand beyond \code{check_window} on
+each side while searching for anchors. Reads that cannot form anchors
+within this limit are discarded.}
+
+\item{min_span_bp}{Minimum expected cut–cut span (bp) required before classifying
+a dual-guide \code{both_cut_excision} event (Plan A′). Default 30.}
+
+\item{excision_tol_bp}{Absolute tolerance (bp) for \code{|del_span - expected|} when
+calling \code{both_cut_excision}. Default 20.}
+
+\item{min_count}{Minimum allele count to retain (default 5).}
+
+\item{fastq}{Source FASTQ path(s). Required unless \code{sample_fastq_dir} is set.}
+
+\item{sample_fastq_dir}{Optional \verb{by_sample/*.fq.gz} directory.}
+
+\item{max_primer_edit}{Maximum edlib edit distance for primer trimming.}
+
+\item{n_core}{OpenMP threads for primer trimming.}
 }
 \value{
-A data frame summarizing the edit-calling results.
+A data frame (\code{editcall_summary.csv} structure).
 }
 \description{
-This function evaluates the alignments of reads to amplicon sequences and performs edit-calling.
-It summarizes the edit-calling results and saves them to output files.
+Consumes \code{\link[=doAssignGenes]{doAssignGenes()}} output (\code{gene_assign}) and per-read FASTQ
+sequences, extracts PAM / cut-site windows, and aggregates alleles by exact
+\code{read_seq} match. \code{\link[=doAssembleAmplicons]{doAssembleAmplicons()}} is not required and is not used.
 }

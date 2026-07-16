@@ -174,28 +174,4 @@ BarcodeHit lookup_barcode(const std::string& barcode, const MutantDict& dict) {
     return hit;
 }
 
-int optional_prefix_edit(const std::string& seq,
-                         const std::string& prefix,
-                         int barcode_start0,
-                         int max_prefix_edit,
-                         long long* n_edlib) {
-    int from = std::max(0, barcode_start0 - static_cast<int>(prefix.size()) - 4);
-    int to = std::max(0, barcode_start0);
-    if (from >= to) return -1;
-    std::string region = seq.substr(static_cast<size_t>(from),
-                                    static_cast<size_t>(to - from));
-    if (region.empty()) return -1;
-    if (n_edlib) (*n_edlib)++;
-    EdlibAlignConfig cfg = edlibNewAlignConfig(
-        max_prefix_edit, EDLIB_MODE_HW, EDLIB_TASK_DISTANCE, nullptr, 0);
-    EdlibAlignResult r = edlibAlign(
-        prefix.c_str(), static_cast<int>(prefix.size()),
-        region.c_str(), static_cast<int>(region.size()),
-        cfg);
-    int edit = r.editDistance;
-    edlibFreeAlignResult(r);
-    if (edit < 0 || edit > max_prefix_edit) return -1;
-    return edit;
-}
-
 } // namespace miaoseq

@@ -1,60 +1,59 @@
 ################################################################################
-# Step 2: Amplicon resolve (Phase C0 prototype)
+# Step 2: Amplicon resolve
 ################################################################################
 
-#' Resolve amplicons per sample (Phase C0)
+#' Assign reads to genes (Step 2a)
 #'
-#' Prototype implementation of Step 2 in the revised pipeline.
-#' Takes demultiplexed assignments and FASTQ, groups reads by sample,
-#' and performs trivial clustering (exact-sequence groups) to produce
-#' per-sample consensus/cluster outputs.
-#'
-#' This Phase C0 version:
-#' - Treats all reads as belonging to a single gene `unknown`
-#'   (no primer/amplicon-based gene assignment yet)
-#' - Uses exact-sequence grouping as clusters
-#' - Uses the cluster representative sequence itself as the consensus
+#' Reads demultiplexed FASTQ records, assigns each read to a target gene by
+#' primer matching, applies orientation normalization, and optionally filters
+#' by **trimmed insert** length against `amplicon_fn` widths.
 #'
 #' @param assignments Path to `assignments.tsv` or a data.frame with at least
-#'   `read_id` and `sample_id` columns.
-#' @param out_dir Output directory, typically `{run_dir}/amplicon`.
+#'   `read_id` and `sample_id`.
+#' @param out_dir Output directory (typically `{run_dir}/amplicon_assign`).
 #' @param fastq Character vector of source FASTQ paths. Required when
-#'   `sample_fastq_dir` is NULL.
-#' @param sample_fastq_dir Optional directory containing `by_sample/{sample_id}.fq`
-#'   or `.fq.gz`. When provided and files exist, those are used preferentially.
-#' @param method Character; one of `"both"`, `"cluster"`, `"consensus"`.
-#'   Phase C0 treats `"both"` and `"cluster"` equivalently.
-#' @param min_reads Integer; minimum reads per `sample_id` to process.
-#' @param min_cluster_reads Integer; minimum reads per exact-sequence cluster
-#'   to retain in outputs.
-#' @param samples Optional character vector of `sample_id` to restrict processing.
-#'   By default, all samples present in `assignments` are processed.
-#' @param n_core Reserved for future parallelisation (currently unused).
-#' @param overwrite Logical; if `FALSE` (default), stop when `out_dir` already
-#'   exists and is non-empty.
+#'   per-sample FASTQ files are unavailable.
+#' @param sample_fastq_dir Optional directory with `by_sample/{sample_id}.fq`
+#'   or `.fq.gz`.
+#' @param primer_list Optional CSV of primer sequences (`primer_id`, `seq`).
+#'   Required for gene assignment and for expected-length filtering.
+#' @param amplicon_fn Optional amplicon reference FASTA used only for
+#'   expected-length filtering (sequence widths). Gene assignment by amplicon
+#'   NW fallback has been removed.
+#' @param max_primer_edit Maximum edit distance for primer matching / trim.
+#' @param end_window Window size (bp) at read ends for primer search.
+#' @param length_tolerance Relative length tolerance when `amplicon_fn` is set
+#'   (compared to trimmed insert length).
+#' @param samples Optional subset of `sample_id` to process.
+#' @param n_core Number of OpenMP threads for C++ assignment/trimming.
+#' @param overwrite If `FALSE`, stop when `out_dir` is non-empty.
+#' @param stats_unassign If `TRUE`, write `stats_unassigned.tsv`.
 #'
-#' @return A list with fields:
-#'   \item{samples}{Processed sample IDs}
-#'   \item{out_dir}{Output directory path}
-#'   \item{table}{Combined `cluster_counts.tsv` as a data.frame}
-#'
+#' @return `GeneAssignResult` list with `samples`, `out_dir`, `table`,
+#'   and `stats_unassigned`.
 #' @export
-#' @importFrom utils write.table
-#' @importFrom Biostrings DNAStringSet writeXStringSet
-doAmpliconResolve <- function(
+#' @importFrom utils read.csv write.table
+#' @importFrom BiocGenerics width
+#' @importFrom Biostrings DNAString
+#' @importFrom Biostrings DNAStringSet
+#' @importFrom Biostrings reverseComplement
+#' @importFrom Biostrings readDNAStringSet
+#' @importFrom Biostrings writeXStringSet
+doAssignGenes <- function(
   assignments,
   out_dir,
   fastq = NULL,
   sample_fastq_dir = NULL,
-  method = c("both", "cluster", "consensus"),
-  min_reads = 5L,
-  min_cluster_reads = 5L,
+  primer_list = NULL,
+  amplicon_fn = NULL,
+  max_primer_edit = 5L,
+  end_window = 150L,
+  length_tolerance = 0.25,
   samples = NULL,
   n_core = 1L,
-  overwrite = FALSE
+  overwrite = FALSE,
+  stats_unassign = FALSE
 ) {
-  method <- match.arg(method)
-
   if (!overwrite && dir.exists(out_dir) && length(list.files(out_dir)) > 0L) {
     stop("out_dir already exists and is not empty. Set overwrite = TRUE to overwrite.")
   }
@@ -66,192 +65,401 @@ doAmpliconResolve <- function(
   if (!all(c("read_id", "sample_id") %in% names(assn))) {
     stop("assignments must contain read_id and sample_id columns.")
   }
-
   if (!is.null(samples)) {
     assn <- assn[assn$sample_id %in% samples, , drop = FALSE]
   }
   if (nrow(assn) < 1L) {
-    warning("No assignments to process in doAmpliconResolve().")
-    summary_path <- file.path(out_dir, "summary_by_sample.tsv")
-    write.table(
-      data.frame(),
-      file = summary_path,
-      sep = "\t",
-      row.names = FALSE,
-      quote = FALSE
+    warning("No assignments to process in doAssignGenes().")
+    empty <- .empty_gene_assign_df()
+    utils::write.table(
+      empty,
+      file = file.path(out_dir, "gene_assignments.tsv"),
+      sep = "\t", row.names = FALSE, quote = FALSE
     )
-    return(list(samples = character(), out_dir = out_dir, table = data.frame()))
+    return(list(
+      samples = character(),
+      out_dir = out_dir,
+      table = empty,
+      stats_unassigned = NULL
+    ))
+  }
+
+  primers <- if (!is.null(primer_list)) .parse_primer_pairs(primer_list) else NULL
+  expected_lengths <- if (!is.null(amplicon_fn)) {
+    amplicon_refs <- Biostrings::readDNAStringSet(amplicon_fn)
+    stats::setNames(as.integer(BiocGenerics::width(amplicon_refs)), names(amplicon_refs))
+  } else {
+    NULL
+  }
+  if (!is.null(expected_lengths) && is.null(primers)) {
+    stop(
+      "amplicon_fn expected-length filtering requires primer_list so that ",
+      "trimmed insert lengths can be measured."
+    )
   }
 
   sample_ids <- sort(unique(assn$sample_id))
-
-  # Load sequences once: by_sample files preferred; otherwise one FASTQ pass
-  sample_seqs <- .resolve_all_sample_sequences(
+  sample_reads <- .resolve_all_sample_reads(
     sample_ids = sample_ids,
     assignments = assn,
     fastq = fastq,
     sample_fastq_dir = sample_fastq_dir
   )
+  sample_reads <- .assign_all_sample_reads(
+    sample_reads = sample_reads,
+    primers = primers,
+    end_window = end_window,
+    max_primer_edit = max_primer_edit,
+    n_core = n_core
+  )
 
-  # Phase C0: single gene bucket per sample
-  gene_id <- "unknown"
+  parts <- vector("list", length(sample_ids))
+  for (i in seq_along(sample_ids)) {
+    sid <- sample_ids[[i]]
+    reads <- sample_reads[[sid]]
+    if (is.null(reads) || nrow(reads) < 1L) {
+      parts[[i]] <- .empty_gene_assign_df()
+      next
+    }
+    if (!"qual" %in% names(reads)) {
+      reads$qual <- rep("", nrow(reads))
+    }
+    reads$sample_id <- sid
+    if (is.null(primers)) {
+      reads$gene_id <- "unknown"
+      reads$assign_status <- "no_ref"
+      reads$flipped <- FALSE
+    }
+    oriented <- .orient_reads_with_qual(reads$seq, reads$qual, reads$flipped)
+    reads$oriented_seq <- oriented$seq
+    reads$oriented_qual <- oriented$qual
+    if (!is.null(expected_lengths)) {
+      reads <- .filter_reads_by_trimmed_insert_length(
+        reads = reads,
+        primers = primers,
+        expected_lengths = expected_lengths,
+        length_tolerance = length_tolerance,
+        max_primer_edit = max_primer_edit,
+        n_core = n_core
+      )
+    }
+    parts[[i]] <- reads[, c(
+      "read_id", "sample_id", "gene_id",
+      "assign_status", "flipped", "total_edit", "f_edit", "r_edit",
+      "oriented_seq", "oriented_qual"
+    )]
+  }
+
+  gene_assignments <- do.call("rbind", parts[!vapply(parts, is.null, logical(1))])
+  if (is.null(gene_assignments)) {
+    gene_assignments <- .empty_gene_assign_df()
+  }
+  rownames(gene_assignments) <- NULL
+  utils::write.table(
+    gene_assignments,
+    file = file.path(out_dir, "gene_assignments.tsv"),
+    sep = "\t", row.names = FALSE, quote = FALSE
+  )
+
+  stats_unassigned_df <- NULL
+  if (isTRUE(stats_unassign)) {
+    stats_unassigned_df <- .stats_unassign_amplicon(gene_assignments)
+    utils::write.table(
+      stats_unassigned_df,
+      file = file.path(out_dir, "stats_unassigned.tsv"),
+      sep = "\t", row.names = FALSE, quote = FALSE
+    )
+  }
+
+  list(
+    samples = sample_ids,
+    out_dir = out_dir,
+    table = gene_assignments,
+    stats_unassigned = stats_unassigned_df
+  )
+}
+
+#' Assemble amplicons from gene-assigned reads (Step 2b)
+#'
+#' Consumes `GeneAssignResult` (from [doAssignGenes()]) or `gene_assignments.tsv`
+#' and performs per sample x gene clustering / consensus.
+#'
+#' @param gene_assign `GeneAssignResult` list, `gene_assignments.tsv` path, or
+#'   a data.frame.
+#' @param out_dir Output directory for per-sample consensus and cluster tables.
+#' @param primer_list Optional primer CSV used for insert trimming before
+#'   clustering.
+#' @param method One of `"both"`, `"cluster"`, or `"consensus"`.
+#' @param min_reads Minimum reads per sample x gene bucket to process.
+#' @param min_cluster_reads Minimum reads per cluster to retain (minor-cluster filter).
+#' @param max_clusters Maximum clusters per sample x gene. Default `Inf` (no
+#'   top-N truncation). Use a finite integer to keep only the largest clusters.
+#' @param min_cluster_identity Minimum sequence identity for vsearch clustering
+#'   (`--id`, `--iddef 2`). Default `0.95`.
+#' @param max_primer_edit Maximum edit distance for primer trim.
+#' @param cluster_backend Clustering method. Fixed to `"vsearch"` (Phase K).
+#' @param assembly_backend Reconstruction backend (`"cluster"` or `"overlap_graph"`).
+#' @param overlap_min_identity Identity threshold for overlap-graph backend.
+#' @param strict_end_trim If `TRUE`, drop reads failing primer trim.
+#' @param min_cluster_purity Minimum fraction of cluster members that share the
+#'   most common exact insert sequence. Clusters below this purity are
+#'   discarded. Default `NULL` (disabled; purity is still reported). Set to
+#'   e.g. `0.8` for strict filtering.
+#' @param overwrite If `FALSE`, stop when `out_dir` is non-empty.
+#' @param n_core OpenMP threads for primer trim.
+#'
+#' @return A list with `samples`, `out_dir`, and assembled `table`
+#'   (data.frame). Key columns in `table`: `fraction` = reads in cluster /
+#'   reads in same gene bucket after clustering; `fraction_bucket` = reads in
+#'   cluster / total reads entering the **sample x gene** bucket after primer
+#'   trim (NOT total demultiplexed reads for the sample).
+#' @export
+doAssembleAmplicons <- function(
+  gene_assign,
+  out_dir,
+  primer_list = NULL,
+
+  method = c("both", "cluster", "consensus"),
+  min_reads = 5L,
+  min_cluster_reads = 5L,
+  max_clusters = Inf,
+  min_cluster_identity = 0.95,
+  max_primer_edit = 5L,
+  cluster_backend = "vsearch",
+  assembly_backend = c("cluster", "overlap_graph"),
+  overlap_min_identity = 0.90,
+  strict_end_trim = FALSE,
+  min_cluster_purity = NULL,
+  overwrite = FALSE,
+  n_core = 1L
+) {
+  method <- match.arg(method)
+  cluster_backend <- match.arg(cluster_backend, choices = "vsearch")
+  if (!is.numeric(min_cluster_identity) || length(min_cluster_identity) != 1L ||
+      is.na(min_cluster_identity) || min_cluster_identity <= 0 ||
+      min_cluster_identity > 1) {
+    stop("min_cluster_identity must be a single numeric in (0, 1].")
+  }
+  if (!(is.infinite(max_clusters) ||
+          (is.numeric(max_clusters) && length(max_clusters) == 1L &&
+             !is.na(max_clusters) && max_clusters >= 1))) {
+    stop("max_clusters must be Inf or a number >= 1.")
+  }
+  if (!is.null(min_cluster_purity) &&
+      (!is.numeric(min_cluster_purity) ||
+         length(min_cluster_purity) != 1L ||
+         is.na(min_cluster_purity) ||
+         min_cluster_purity < 0 ||
+         min_cluster_purity > 1)) {
+    stop("min_cluster_purity must be NULL or a single numeric in [0, 1].")
+  }
+  assembly_backend <- match.arg(assembly_backend)
+  if (identical(assembly_backend, "cluster") &&
+      method %in% c("both", "consensus") &&
+      !nzchar(Sys.which("abpoa"))) {
+    stop("Consensus assembly requires the abpoa binary on PATH.")
+  }
+  if (identical(assembly_backend, "cluster") &&
+      !nzchar(Sys.which("vsearch"))) {
+    stop("Clustering requires the vsearch binary on PATH.")
+  }
+  if (!overwrite && dir.exists(out_dir) && length(list.files(out_dir)) > 0L) {
+    stop("out_dir already exists and is not empty. Set overwrite = TRUE to overwrite.")
+  }
+  if (!dir.exists(out_dir)) {
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  }
+
+  ga <- .as_gene_assign_df(gene_assign)
+  sample_ids <- sort(unique(ga$sample_id))
+  primers <- if (!is.null(primer_list)) .parse_primer_pairs(primer_list) else NULL
 
   combined_counts <- list()
+  combined_members <- list()
   summary_rows <- vector("list", length(sample_ids))
-
   for (i in seq_along(sample_ids)) {
     sid <- sample_ids[[i]]
     sid_dir <- file.path(out_dir, sid)
     if (!dir.exists(sid_dir)) {
       dir.create(sid_dir, recursive = TRUE, showWarnings = FALSE)
     }
-
-    seqs <- sample_seqs[[sid]]
-    if (is.null(seqs)) seqs <- character()
-
-    n_in <- length(seqs)
-    if (n_in < min_reads) {
-      stats_df <- .make_amplicon_stats(
-        sample_id = sid,
-        n_reads_in = n_in,
-        n_reads_assigned_gene = 0L,
-        n_genes_detected = 0L,
-        n_clusters_total = 0L,
-        skip_reason = "low_sample_reads"
-      )
-      utils::write.table(
-        stats_df,
-        file = file.path(sid_dir, "stats.tsv"),
-        sep = "\t",
-        row.names = FALSE,
-        quote = FALSE
-      )
-      summary_rows[[i]] <- data.frame(
-        sample_id = sid,
-        n_reads = n_in,
-        n_clusters = 0L,
-        skip_reason = "low_sample_reads",
-        stringsAsFactors = FALSE
-      )
+    reads <- ga[ga$sample_id == sid, , drop = FALSE]
+    n_in <- nrow(reads)
+    if (n_in < 1L) {
+      .write_sample_skip(sid_dir, sid, 0L, 0L, "empty_sample")
+      summary_rows[[i]] <- .make_summary_row(sid, 0L, 0L, 0L, "empty_sample")
+      next
+    }
+    reads <- reads[!is.na(reads$gene_id) & reads$gene_id != "" &
+      reads$assign_status == "assigned", , drop = FALSE]
+    gene_ids <- unique(reads$gene_id)
+    if (length(gene_ids) < 1L) {
+      .write_sample_skip(sid_dir, sid, n_in, 0L, "no_gene_assigned")
+      summary_rows[[i]] <- .make_summary_row(sid, n_in, 0L, 0L, "no_gene_assigned")
       next
     }
 
-    # Phase C0 clustering: exact sequence groups
-    tbl <- table(seqs)
-    tbl <- sort(tbl, decreasing = TRUE)
-    keep <- tbl >= as.integer(min_cluster_reads)
-    tbl_keep <- tbl[keep]
+    sample_clusters <- list()
+    sample_members <- list()
+    sample_unassigned <- list()
+    n_assigned <- 0L
+    n_clusters_total <- 0L
+    n_genes_low_reads <- 0L
+    n_genes_no_clusters <- 0L
+    for (gid in gene_ids) {
+      gene_reads <- reads[reads$gene_id == gid, , drop = FALSE]
+      if (nrow(gene_reads) < min_reads) {
+        n_genes_low_reads <- n_genes_low_reads + 1L
+        sample_unassigned[[length(sample_unassigned) + 1L]] <- .unassigned_rows(
+          sid, gid, gene_reads$read_id, "low_gene_reads"
+        )
+        next
+      }
+      prepared <- .prepare_gene_seqs_for_cluster(
+        gene_reads = gene_reads,
+        primers = primers,
+        gene_id = gid,
+        max_primer_edit = max_primer_edit,
+        n_core = n_core,
+        strict_end_trim = strict_end_trim
+      )
+      # Reads dropped by trim / empty sequence.
+      dropped_ids <- setdiff(
+        as.character(gene_reads$read_id),
+        as.character(prepared$read_id)
+      )
+      if (length(dropped_ids) > 0L) {
+        sample_unassigned[[length(sample_unassigned) + 1L]] <- .unassigned_rows(
+          sid, gid, dropped_ids, "trim_or_empty"
+        )
+      }
+      if (length(prepared$seqs) < min_reads) {
+        n_genes_no_clusters <- n_genes_no_clusters + 1L
+        sample_unassigned[[length(sample_unassigned) + 1L]] <- .unassigned_rows(
+          sid, gid, prepared$read_id, "insufficient_after_trim"
+        )
+        next
+      }
+      assembled <- if (identical(assembly_backend, "overlap_graph")) {
+        .assemble_overlap_graph_reads(
+          seqs = prepared$seqs,
+          gene_id = gid,
+          sample_id = sid,
+          min_cluster_reads = min_cluster_reads,
+          max_clusters = max_clusters,
+          min_cluster_identity = min_cluster_identity,
+          overlap_min_identity = overlap_min_identity,
+          min_cluster_purity = min_cluster_purity,
+          read_id = prepared$read_id
+        )
+      } else {
+        .cluster_and_consensus_reads(
+          seqs = prepared$seqs,
+          gene_id = gid,
+          sample_id = sid,
+          method = method,
+          min_cluster_reads = min_cluster_reads,
+          max_clusters = max_clusters,
+          min_cluster_identity = min_cluster_identity,
+          cluster_backend = cluster_backend,
+          min_cluster_purity = min_cluster_purity,
+          read_id = prepared$read_id
+        )
+      }
+      clusters <- assembled$clusters
+      if (!is.null(assembled$unassigned) && nrow(assembled$unassigned) > 0L) {
+        sample_unassigned[[length(sample_unassigned) + 1L]] <- assembled$unassigned
+      }
+      if (!is.null(assembled$members) && nrow(assembled$members) > 0L) {
+        sample_members[[length(sample_members) + 1L]] <- assembled$members
+      }
+      if (is.null(clusters) || nrow(clusters) < 1L) {
+        n_genes_no_clusters <- n_genes_no_clusters + 1L
+        next
+      }
+      sample_clusters[[gid]] <- clusters
+      n_assigned <- n_assigned + sum(clusters$n_reads)
+      n_clusters_total <- n_clusters_total + nrow(clusters)
+    }
 
-    if (length(tbl_keep) < 1L) {
-      stats_df <- .make_amplicon_stats(
-        sample_id = sid,
-        n_reads_in = n_in,
-        n_reads_assigned_gene = 0L,
-        n_genes_detected = 0L,
-        n_clusters_total = 0L,
-        skip_reason = "no_clusters"
-      )
+    unassigned_df <- if (length(sample_unassigned) > 0L) {
+      do.call(rbind, sample_unassigned)
+    } else {
+      .empty_unassigned_to_cluster()
+    }
+    if (!is.null(unassigned_df) && nrow(unassigned_df) > 0L) {
+      rownames(unassigned_df) <- NULL
       utils::write.table(
-        stats_df,
-        file = file.path(sid_dir, "stats.tsv"),
-        sep = "\t",
-        row.names = FALSE,
-        quote = FALSE
+        unassigned_df,
+        file = file.path(sid_dir, "unassigned_to_cluster.tsv"),
+        sep = "\t", row.names = FALSE, quote = FALSE
       )
-      summary_rows[[i]] <- data.frame(
-        sample_id = sid,
-        n_reads = n_in,
-        n_clusters = 0L,
-        skip_reason = "no_clusters",
-        stringsAsFactors = FALSE
-      )
+    }
+
+    if (length(sample_clusters) < 1L) {
+      skip_reason <- if (n_genes_low_reads > 0L) "low_gene_reads" else "no_clusters"
+      .write_sample_skip(sid_dir, sid, n_in, n_genes_low_reads, skip_reason)
+      summary_rows[[i]] <- .make_summary_row(sid, n_in, 0L, 0L, skip_reason)
       next
     }
 
-    # Build cluster table
-    n_gene_reads <- sum(tbl_keep)
-    clusters <- data.frame(
-      sample_id = sid,
-      gene_id = gene_id,
-      cluster_id = seq_along(tbl_keep),
-      seq = names(tbl_keep),
-      n_reads = as.integer(unname(tbl_keep)),
-      stringsAsFactors = FALSE
-    )
-    clusters$n_reads_gene <- n_gene_reads
-    clusters$fraction <- clusters$n_reads / n_gene_reads
-    clusters$fraction_sample <- clusters$n_reads / n_in
-    clusters$method <- "exact"
-
-    # consensus.fasta / clusters.fasta
+    clusters <- do.call(rbind, sample_clusters)
+    rownames(clusters) <- NULL
     dna <- Biostrings::DNAStringSet(clusters$seq)
     names(dna) <- sprintf(
       "%s|cluster_%d;size=%d;sample=%s",
-      clusters$gene_id,
-      clusters$cluster_id,
-      clusters$n_reads,
-      clusters$sample_id
+      clusters$gene_id, clusters$cluster_id, clusters$n_reads, clusters$sample_id
     )
-
-    # In Phase C0, consensus == cluster representative
-    Biostrings::writeXStringSet(
-      dna,
-      filepath = file.path(sid_dir, "consensus.fasta")
-    )
-    if (method %in% c("both", "cluster")) {
+    Biostrings::writeXStringSet(dna, filepath = file.path(sid_dir, "consensus.fasta"))
+    if (method %in% c("both", "cluster") && length(sample_members) > 0L) {
+      members_df <- do.call(rbind, sample_members)
+      rownames(members_df) <- NULL
+      mem_dna <- Biostrings::DNAStringSet(members_df$seq)
+      names(mem_dna) <- paste(members_df$read_id, members_df$cluster_id)
       Biostrings::writeXStringSet(
-        dna,
+        mem_dna,
         filepath = file.path(sid_dir, "clusters.fasta")
       )
+      combined_members[[sid]] <- members_df
     }
-
-    counts_path <- file.path(sid_dir, "cluster_counts.tsv")
-    utils::write.table(
-      clusters[, c(
-        "sample_id", "gene_id", "cluster_id",
-        "n_reads", "fraction", "fraction_sample",
-        "n_reads_gene", "method"
-      )],
-      file = counts_path,
-      sep = "\t",
-      row.names = FALSE,
-      quote = FALSE
+    count_cols <- c(
+      "sample_id", "gene_id", "cluster_id",
+      "n_reads", "fraction", "fraction_bucket",
+      "n_reads_gene", "method", "cluster_purity"
     )
-
+    count_cols <- count_cols[count_cols %in% names(clusters)]
+    utils::write.table(
+      clusters[, count_cols, drop = FALSE],
+      file = file.path(sid_dir, "cluster_counts.tsv"),
+      sep = "\t", row.names = FALSE, quote = FALSE
+    )
     stats_df <- .make_amplicon_stats(
       sample_id = sid,
       n_reads_in = n_in,
-      n_reads_assigned_gene = n_gene_reads,
-      n_genes_detected = 1L,
-      n_clusters_total = nrow(clusters),
+      n_reads_assigned_gene = n_assigned,
+      n_genes_detected = length(unique(clusters$gene_id)),
+      n_clusters_total = n_clusters_total,
+      n_skipped_low_count = n_genes_low_reads,
       skip_reason = ""
     )
     utils::write.table(
       stats_df,
       file = file.path(sid_dir, "stats.tsv"),
-      sep = "\t",
-      row.names = FALSE,
-      quote = FALSE
+      sep = "\t", row.names = FALSE, quote = FALSE
     )
-
-    summary_rows[[i]] <- data.frame(
-      sample_id = sid,
-      n_reads = n_in,
-      n_clusters = nrow(clusters),
-      skip_reason = "",
-      stringsAsFactors = FALSE
+    summary_rows[[i]] <- .make_summary_row(
+      sid, n_in, n_clusters_total, length(unique(clusters$gene_id)), ""
     )
-
     combined_counts[[sid]] <- clusters
   }
 
-  # Combined outputs under out_dir
   summary_df <- do.call("rbind", summary_rows[!vapply(summary_rows, is.null, logical(1))])
   if (is.null(summary_df)) {
     summary_df <- data.frame(
       sample_id = character(),
       n_reads = integer(),
       n_clusters = integer(),
+      n_genes = integer(),
       skip_reason = character(),
       stringsAsFactors = FALSE
     )
@@ -259,9 +467,7 @@ doAmpliconResolve <- function(
   utils::write.table(
     summary_df,
     file = file.path(out_dir, "summary_by_sample.tsv"),
-    sep = "\t",
-    row.names = FALSE,
-    quote = FALSE
+    sep = "\t", row.names = FALSE, quote = FALSE
   )
 
   combined_table <- if (length(combined_counts)) {
@@ -275,22 +481,86 @@ doAmpliconResolve <- function(
       n_reads = integer(),
       n_reads_gene = integer(),
       fraction = numeric(),
-      fraction_sample = numeric(),
+      fraction_bucket = numeric(),
       method = character(),
       stringsAsFactors = FALSE
     )
   }
 
+  tools_needed <- c("vsearch", "abpoa")
+  versions <- .tool_versions(tools_needed)
+  pkg_ver <- tryCatch(
+    as.character(utils::packageVersion("miaoseq")),
+    error = function(e) NA_character_
+  )
+  write(
+    paste0(
+      "r_version=", R.version.string, "\n",
+      "miaoseq_version=", pkg_ver, "\n",
+      "cluster_backend=", cluster_backend, "\n",
+      "assembly_backend=", assembly_backend, "\n",
+      "min_cluster_identity=", min_cluster_identity, "\n",
+      "max_clusters=", max_clusters, "\n",
+      "min_cluster_reads=", min_cluster_reads, "\n",
+      "min_reads=", min_reads, "\n",
+      "min_cluster_purity=",
+      if (is.null(min_cluster_purity)) "NULL" else min_cluster_purity, "\n",
+      "strict_end_trim=", strict_end_trim, "\n",
+      "n_samples=", length(sample_ids), "\n",
+      "n_clusters=", nrow(combined_table), "\n",
+      paste(paste0("version_", names(versions), "=", versions), collapse = "\n"),
+      "\n"
+    ),
+    file = file.path(out_dir, "run_stats.txt")
+  )
+
   list(
     samples = sample_ids,
     out_dir = out_dir,
-    table = combined_table
+    table = combined_table,
+    gene_assignments = ga
   )
 }
 
+#' @export
+doAmpliconResolve <- doAssembleAmplicons
+
 ################################################################################
-# Internal helpers (Phase C0)
+# Internal helpers
 ################################################################################
+
+#' @keywords internal
+.make_summary_row <- function(sample_id, n_reads, n_clusters, n_genes, skip_reason) {
+  data.frame(
+    sample_id = sample_id,
+    n_reads = n_reads,
+    n_clusters = n_clusters,
+    n_genes = n_genes,
+    skip_reason = skip_reason,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' @keywords internal
+.write_sample_skip <- function(sid_dir, sample_id, n_in,
+                               n_skipped_low_count = 0L,
+                               skip_reason) {
+  stats_df <- .make_amplicon_stats(
+    sample_id = sample_id,
+    n_reads_in = n_in,
+    n_reads_assigned_gene = 0L,
+    n_genes_detected = 0L,
+    n_clusters_total = 0L,
+    n_skipped_low_count = n_skipped_low_count,
+    skip_reason = skip_reason
+  )
+  utils::write.table(
+    stats_df,
+    file = file.path(sid_dir, "stats.tsv"),
+    sep = "\t", row.names = FALSE, quote = FALSE
+  )
+  invisible(stats_df)
+}
 
 #' @keywords internal
 .make_amplicon_stats <- function(sample_id,
@@ -298,6 +568,7 @@ doAmpliconResolve <- function(
                                  n_reads_assigned_gene,
                                  n_genes_detected,
                                  n_clusters_total,
+                                 n_skipped_low_count = 0L,
                                  skip_reason) {
   data.frame(
     sample_id = sample_id,
@@ -306,29 +577,292 @@ doAmpliconResolve <- function(
     n_reads_unassigned_gene = n_reads_in - n_reads_assigned_gene,
     n_genes_detected = n_genes_detected,
     n_clusters_total = n_clusters_total,
-    n_skipped_low_count = as.integer(skip_reason == "low_sample_reads"),
+    n_skipped_low_count = as.integer(n_skipped_low_count),
     skip_reason = skip_reason,
     stringsAsFactors = FALSE
   )
 }
 
-# Resolve sequences for all samples.
-# Uses per-sample FASTQ when available; otherwise buckets from one FASTQ pass.
 #' @keywords internal
-.resolve_all_sample_sequences <- function(sample_ids,
-                                          assignments,
-                                          fastq,
-                                          sample_fastq_dir = NULL) {
+.empty_gene_assign_df <- function() {
+  data.frame(
+    read_id = character(),
+    sample_id = character(),
+    gene_id = character(),
+    assign_status = character(),
+    flipped = logical(),
+    total_edit = integer(),
+    f_edit = integer(),
+    r_edit = integer(),
+    oriented_seq = character(),
+    oriented_qual = character(),
+    stringsAsFactors = FALSE
+  )
+}
+
+#' @keywords internal
+.as_gene_assign_df <- function(x) {
+  if (is.list(x) && !is.null(x$gene_assignments) &&
+      is.data.frame(x$gene_assignments)) {
+    out <- x$gene_assignments
+  } else if (is.list(x) && !is.null(x$table)) {
+    out <- x$table
+  } else if (is.character(x) && length(x) == 1L && file.exists(x)) {
+    p <- x
+    if (dir.exists(p)) {
+      p <- file.path(p, "gene_assignments.tsv")
+    }
+    if (!file.exists(p)) {
+      stop("gene_assign path does not contain gene_assignments.tsv: ", x)
+    }
+    out <- utils::read.delim(p, stringsAsFactors = FALSE)
+  } else if (is.data.frame(x)) {
+    out <- x
+  } else {
+    stop("gene_assign must be GeneAssignResult, path to gene_assignments.tsv, or data.frame.")
+  }
+  req <- c("read_id", "sample_id", "gene_id", "assign_status", "oriented_seq")
+  if (!all(req %in% names(out))) {
+    stop("gene_assign must contain: ", paste(req, collapse = ", "))
+  }
+  if (!"oriented_qual" %in% names(out)) {
+    out$oriented_qual <- rep("", nrow(out))
+  }
+  out
+}
+
+#' @keywords internal
+.parse_primer_pairs <- function(primer_list) {
+  primers <- utils::read.csv(primer_list, header = FALSE, stringsAsFactors = FALSE)
+  if (ncol(primers) < 2L) {
+    stop("primer_list must have at least two columns: primer_id, sequence.")
+  }
+  names(primers)[1:2] <- c("primer_id", "seq")
+  primers$seq <- toupper(gsub("[^ACGT]", "", primers$seq))
+
+  f_idx <- grepl("_F$", primers$primer_id)
+  r_idx <- grepl("_R$", primers$primer_id)
+  f_primers <- primers[f_idx, , drop = FALSE]
+  r_primers <- primers[r_idx, , drop = FALSE]
+  f_primers$gene_id <- sub("_F$", "", f_primers$primer_id)
+  r_primers$gene_id <- sub("_R$", "", r_primers$primer_id)
+
+  pairs <- merge(
+    f_primers[, c("gene_id", "seq")],
+    r_primers[, c("gene_id", "seq")],
+    by = "gene_id",
+    suffixes = c(".f", ".r")
+  )
+  if (nrow(pairs) < 1L) {
+    stop("primer_list must contain at least one _F/_R primer pair.")
+  }
+  missing_r <- setdiff(f_primers$gene_id, r_primers$gene_id)
+  missing_f <- setdiff(r_primers$gene_id, f_primers$gene_id)
+  if (length(missing_r) || length(missing_f)) {
+    stop(
+      "primer_list has unpaired genes: missing _R for ",
+      paste(missing_r, collapse = ", "),
+      "; missing _F for ",
+      paste(missing_f, collapse = ", ")
+    )
+  }
+
+  pairs <- pairs[order(pairs$gene_id), , drop = FALSE]
+  rownames(pairs) <- NULL
+  pairs
+}
+
+#' @keywords internal
+.assign_all_sample_reads <- function(sample_reads, primers,
+                                     end_window, max_primer_edit,
+                                     n_core = 1L) {
+  sids <- names(sample_reads)
+  if (length(sids) < 1L) return(sample_reads)
+
+  n_per <- vapply(sample_reads, function(x) {
+    if (is.null(x) || !is.data.frame(x)) 0L else nrow(x)
+  }, integer(1))
+
+  all_ids <- character(sum(n_per))
+  all_seqs <- character(sum(n_per))
+  all_quals <- character(sum(n_per))
+  offset <- 0L
+  for (i in seq_along(sids)) {
+    n <- n_per[[i]]
+    if (n < 1L) next
+    idx <- offset + seq_len(n)
+    part <- sample_reads[[sids[[i]]]]
+    all_ids[idx] <- as.character(part$read_id)
+    all_seqs[idx] <- as.character(part$seq)
+    all_quals[idx] <- if ("qual" %in% names(part)) {
+      as.character(part$qual)
+    } else {
+      rep("", n)
+    }
+    offset <- offset + n
+  }
+
+  gene_id <- rep(NA_character_, length(all_seqs))
+  flipped <- rep(FALSE, length(all_seqs))
+  total_edit <- rep(NA_integer_, length(all_seqs))
+  f_edit <- rep(NA_integer_, length(all_seqs))
+  r_edit <- rep(NA_integer_, length(all_seqs))
+  assign_status <- rep(NA_character_, length(all_seqs))
+
+  if (!is.null(primers) && length(all_seqs) > 0L) {
+    res <- assign_genes_primers_cpp(
+      seqs = all_seqs,
+      gene_ids = primers$gene_id,
+      f_primers = primers$seq.f,
+      r_primers = primers$seq.r,
+      end_window = as.integer(end_window),
+      max_primer_edit = as.integer(max_primer_edit),
+      n_core = as.integer(max(1L, n_core))
+    )
+    gene_id <- res$gene_id
+    flipped <- res$flipped
+    total_edit <- res$total_edit
+    f_edit <- res$f_edit
+    r_edit <- res$r_edit
+    assign_status <- res$status
+  }
+
+  offset <- 0L
+  for (i in seq_along(sids)) {
+    n <- n_per[[i]]
+    if (n < 1L) {
+      sample_reads[[sids[[i]]]] <- data.frame(
+        read_id = character(),
+        seq = character(),
+        qual = character(),
+        gene_id = character(),
+        flipped = logical(),
+        total_edit = integer(),
+        f_edit = integer(),
+        r_edit = integer(),
+        assign_status = character(),
+        stringsAsFactors = FALSE
+      )
+      next
+    }
+    idx <- offset + seq_len(n)
+    sample_reads[[sids[[i]]]] <- data.frame(
+      read_id = all_ids[idx],
+      seq = all_seqs[idx],
+      qual = all_quals[idx],
+      gene_id = gene_id[idx],
+      flipped = flipped[idx],
+      total_edit = total_edit[idx],
+      f_edit = f_edit[idx],
+      r_edit = r_edit[idx],
+      assign_status = assign_status[idx],
+      stringsAsFactors = FALSE
+    )
+    offset <- offset + n
+  }
+  sample_reads
+}
+
+#' @keywords internal
+.assign_reads_to_genes <- function(reads, primers,
+                                   end_window, max_primer_edit,
+                                   n_core = 1L) {
+  # Compatibility wrapper: single-sample path via batch helper.
+  tmp <- list(x = reads)
+  names(tmp) <- "x"
+  out <- .assign_all_sample_reads(
+    sample_reads = tmp,
+    primers = primers,
+    end_window = end_window,
+    max_primer_edit = max_primer_edit,
+    n_core = n_core
+  )[["x"]]
+  out
+}
+
+#' @keywords internal
+.orient_read_seqs <- function(seqs, flipped) {
+  if (length(seqs) < 1L) return(character())
+  as.character(reverse_complement_seqs_cpp(seqs, flipped))
+}
+
+#' @keywords internal
+.orient_reads_with_qual <- function(seqs, quals, flipped) {
+  if (length(seqs) < 1L) {
+    return(list(seq = character(), qual = character()))
+  }
+  flipped <- as.logical(flipped)
+  if (length(flipped) == 1L) flipped <- rep(flipped, length(seqs))
+  out_seq <- as.character(reverse_complement_seqs_cpp(seqs, flipped))
+  if (is.null(quals) || length(quals) != length(seqs)) {
+    quals <- rep("", length(seqs))
+  }
+  out_qual <- as.character(reverse_quals_cpp(as.character(quals), flipped))
+  list(seq = out_seq, qual = out_qual)
+}
+
+#' @keywords internal
+.prepare_gene_seqs_for_cluster <- function(gene_reads, primers, gene_id,
+                                           max_primer_edit, n_core,
+                                           strict_end_trim = FALSE) {
+  seqs <- as.character(gene_reads$oriented_seq)
+  read_ids <- as.character(gene_reads$read_id)
+
+  if (is.null(primers)) {
+    keep <- nzchar(seqs) & !is.na(seqs)
+    return(list(
+      seqs = seqs[keep],
+      read_id = read_ids[keep]
+    ))
+  }
+
+  fp <- primers$seq.f[primers$gene_id == gene_id]
+  rp <- primers$seq.r[primers$gene_id == gene_id]
+  trimmed <- trim_amplicon_insert_cpp(
+    seqs,
+    f_primer = fp,
+    r_primer = rp,
+    max_edit = as.integer(max_primer_edit),
+    n_core = as.integer(max(1L, n_core))
+  )
+  ok <- !is.na(trimmed$start) & nzchar(trimmed$seq)
+  use_seqs <- as.character(trimmed$seq)
+
+  for (i in seq_along(seqs)) {
+    if (!isTRUE(ok[[i]])) {
+      if (isTRUE(strict_end_trim)) {
+        use_seqs[[i]] <- ""
+      } else {
+        use_seqs[[i]] <- seqs[[i]]
+      }
+    }
+  }
+
+  keep <- nzchar(use_seqs)
+  list(
+    seqs = use_seqs[keep],
+    read_id = read_ids[keep]
+  )
+}
+
+#' @keywords internal
+.resolve_all_sample_reads <- function(sample_ids, assignments, fastq,
+                                      sample_fastq_dir = NULL) {
   result <- stats::setNames(vector("list", length(sample_ids)), sample_ids)
   need_fastq <- character()
 
   for (sid in sample_ids) {
-    seqs <- .read_sample_fastq_if_present(sid, sample_fastq_dir)
-    if (!is.null(seqs)) {
-      result[[sid]] <- seqs
+    reads <- .read_sample_reads_if_present(sid, sample_fastq_dir)
+    if (!is.null(reads)) {
+      result[[sid]] <- reads
     } else {
       need_fastq <- c(need_fastq, sid)
-      result[[sid]] <- character()
+      result[[sid]] <- data.frame(
+        read_id = character(),
+        seq = character(),
+        qual = character(),
+        stringsAsFactors = FALSE
+      )
     }
   }
 
@@ -336,14 +870,18 @@ doAmpliconResolve <- function(
     if (is.null(fastq) || length(fastq) < 1L) {
       stop("Either sample_fastq_dir (with per-sample FASTQ) or fastq must be provided.")
     }
-    id2sample <- stats::setNames(assignments$sample_id, assignments$read_id)
-    buckets <- .bucket_sequences_from_fastq(
+    buckets <- .bucket_reads_from_fastq(
       fastq = fastq,
-      id2sample = id2sample,
+      assignments = assignments,
       target_samples = need_fastq
     )
     for (sid in need_fastq) {
-      result[[sid]] <- buckets[[sid]] %||% character()
+      result[[sid]] <- buckets[[sid]] %||% data.frame(
+        read_id = character(),
+        seq = character(),
+        qual = character(),
+        stringsAsFactors = FALSE
+      )
     }
   }
 
@@ -351,81 +889,713 @@ doAmpliconResolve <- function(
 }
 
 #' @keywords internal
-.read_sample_fastq_if_present <- function(sample_id, sample_fastq_dir) {
-  if (is.null(sample_fastq_dir)) {
-    return(NULL)
-  }
+.read_sample_reads_if_present <- function(sample_id, sample_fastq_dir) {
+  if (is.null(sample_fastq_dir)) return(NULL)
   cand <- file.path(sample_fastq_dir, paste0(sample_id, ".fq.gz"))
   if (!file.exists(cand)) {
     cand <- file.path(sample_fastq_dir, paste0(sample_id, ".fq"))
   }
   if (file.exists(cand)) {
-    return(.read_all_sequences_from_fastq(cand))
+    return(.read_all_reads_from_fastq(cand))
   }
   NULL
 }
 
-# One pass over FASTQ(s), bucket sequences by sample_id.
 #' @keywords internal
-.bucket_sequences_from_fastq <- function(fastq, id2sample, target_samples) {
-  buckets <- stats::setNames(
-    vector("list", length(target_samples)),
-    target_samples
+.bucket_reads_from_fastq <- function(fastq, assignments, target_samples) {
+  raw <- bucket_fastq_assignments_cpp(
+    fastq_files = as.character(fastq),
+    read_ids = as.character(assignments$read_id),
+    sample_ids = as.character(assignments$sample_id),
+    target_samples = as.character(target_samples)
   )
+  out <- stats::setNames(vector("list", length(target_samples)), target_samples)
   for (sid in target_samples) {
-    buckets[[sid]] <- character()
+    part <- raw[[sid]]
+    out[[sid]] <- data.frame(
+      read_id = as.character(part$read_id),
+      seq = as.character(part$seq),
+      qual = as.character(part$qual),
+      stringsAsFactors = FALSE
+    )
   }
-
-  for (fq in fastq) {
-    con <- if (grepl("\\.gz$", fq, ignore.case = TRUE)) {
-      gzfile(fq, open = "rt")
-    } else {
-      file(fq, open = "rt")
-    }
-
-    repeat {
-      h <- readLines(con, n = 1L)
-      if (length(h) == 0L) break
-      s <- readLines(con, n = 1L)
-      p <- readLines(con, n = 1L)
-      q <- readLines(con, n = 1L)
-      if (length(s) == 0L || length(p) == 0L || length(q) == 0L) break
-
-      rid <- sub("^@", "", strsplit(h, "\\s+")[[1]][1])
-      sid <- unname(id2sample[rid])
-      if (length(sid) == 1L && !is.na(sid) && sid %in% target_samples) {
-        buckets[[sid]] <- c(buckets[[sid]], s)
-      }
-    }
-    close(con)
-  }
-
-  buckets
+  out
 }
 
-# Null-coalescing helper for lists.
+#' @keywords internal
+.read_all_reads_from_fastq <- function(fastq) {
+  raw <- read_fastq_seqs_cpp(as.character(fastq)[[1]])
+  data.frame(
+    read_id = as.character(raw$read_id),
+    seq = as.character(raw$seq),
+    qual = as.character(raw$qual),
+    stringsAsFactors = FALSE
+  )
+}
+
 #' @keywords internal
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
-# Read all sequences from a (possibly gzipped) FASTQ file.
-.read_all_sequences_from_fastq <- function(fastq) {
-  con <- if (grepl("\\.gz$", fastq, ignore.case = TRUE)) {
-    gzfile(fastq, open = "rt")
-  } else {
-    file(fastq, open = "rt")
-  }
-  on.exit(close(con), add = TRUE)
-
-  seqs <- character()
-  repeat {
-    h <- readLines(con, n = 1L)
-    if (length(h) == 0L) break
-    s <- readLines(con, n = 1L)
-    p <- readLines(con, n = 1L)
-    q <- readLines(con, n = 1L)
-    if (length(s) == 0L || length(p) == 0L || length(q) == 0L) break
-    seqs <- c(seqs, s)
-  }
-  seqs
+#' Capture external tool versions for provenance logging
+#' @param tools Character vector of tool names to query (e.g. "vsearch", "abpoa").
+#' @return Named character vector of version strings (NA if tool unavailable).
+#' @keywords internal
+.tool_versions <- function(tools = c("vsearch", "abpoa", "blastn", "mmseqs")) {
+  vapply(tools, function(t) {
+    bin <- Sys.which(t)
+    if (!nzchar(bin)) return(NA_character_)
+    tryCatch({
+      out <- suppressWarnings(system2(bin, "--version", stdout = TRUE, stderr = TRUE))
+      out <- out[nzchar(out)]
+      if (length(out) < 1L) return("unknown")
+      trimws(out[[1L]])
+    }, error = function(e) "unknown")
+  }, character(1))
 }
 
+#' @keywords internal
+.assign_genes_by_amplicon_ref <- function(seqs, amplicon_refs, max_edit,
+                                          n_core = 1L) {
+  stop(
+    "Amplicon-ref gene-assignment fallback has been removed. ",
+    "Use primer_list for gene assignment.",
+    call. = FALSE
+  )
+}
+
+#' @keywords internal
+.filter_reads_by_trimmed_insert_length <- function(reads,
+                                                    primers,
+                                                    expected_lengths,
+                                                    length_tolerance,
+                                                    max_primer_edit,
+                                                    n_core = 1L) {
+  if (nrow(reads) < 1L) return(reads)
+  keep <- logical(nrow(reads))
+  for (i in seq_len(nrow(reads))) {
+    gid <- reads$gene_id[[i]]
+    status <- reads$assign_status[[i]]
+    if (is.na(gid) || !nzchar(gid) || !identical(status, "assigned")) {
+      keep[[i]] <- TRUE
+      next
+    }
+    exp_len <- expected_lengths[[gid]]
+    if (is.null(exp_len) || is.na(exp_len) || exp_len < 1L) {
+      keep[[i]] <- TRUE
+      next
+    }
+    fp <- primers$seq.f[primers$gene_id == gid]
+    rp <- primers$seq.r[primers$gene_id == gid]
+    if (length(fp) < 1L || length(rp) < 1L) {
+      keep[[i]] <- FALSE
+      next
+    }
+    trimmed <- trim_amplicon_insert_cpp(
+      as.character(reads$oriented_seq[[i]]),
+      f_primer = fp[[1]],
+      r_primer = rp[[1]],
+      max_edit = as.integer(max_primer_edit),
+      n_core = 1L
+    )
+    if (is.na(trimmed$start[[1]]) || !nzchar(trimmed$seq[[1]])) {
+      keep[[i]] <- FALSE
+      next
+    }
+    obs <- nchar(trimmed$seq[[1]])
+    keep[[i]] <- obs >= exp_len * (1 - length_tolerance) &&
+      obs <= exp_len * (1 + length_tolerance)
+  }
+  reads[keep, , drop = FALSE]
+}
+
+#' @keywords internal
+.consensus_via_abpoa <- function(members) {
+  if (length(members) < 1L) return("")
+  if (length(members) == 1L) return(members[[1]])
+  abpoa <- Sys.which("abpoa")
+  if (!nzchar(abpoa)) {
+    stop("abpoa binary not found on PATH.")
+  }
+  tmp <- tempfile(fileext = ".fa")
+  on.exit(unlink(tmp), add = TRUE)
+  con <- file(tmp, open = "wt")
+  for (i in seq_along(members)) {
+    writeLines(sprintf(">r%d", i), con)
+    writeLines(members[[i]], con)
+  }
+  close(con)
+  out <- system2(abpoa, args = c("-r", "0", "-m", "0", tmp),
+                 stdout = TRUE, stderr = FALSE)
+  status <- attr(out, "status")
+  if (!is.null(status) && !identical(as.integer(status), 0L)) {
+    stop("abpoa failed (exit ", status, ")")
+  }
+  seq_lines <- out[!grepl("^>", out) & nzchar(out)]
+  if (length(seq_lines) < 1L) {
+    stop("abpoa produced no consensus sequence.")
+  }
+  paste(seq_lines, collapse = "")
+}
+
+#' @keywords internal
+.vsearch_id_threshold <- function(min_cluster_identity) {
+  id <- as.numeric(min_cluster_identity)
+  max(0.50, min(1.0, id))
+}
+
+#' @keywords internal
+.cluster_ids_vsearch <- function(seqs, min_cluster_identity, max_clusters) {
+  n <- length(seqs)
+  if (n < 1L) return(integer())
+  vsearch <- Sys.which("vsearch")
+  if (!nzchar(vsearch)) stop("vsearch binary not found on PATH.")
+
+  tmp_dir <- tempfile("vsearch_")
+  dir.create(tmp_dir)
+  on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
+  fa <- file.path(tmp_dir, "in.fa")
+  uc <- file.path(tmp_dir, "out.uc")
+
+  con <- file(fa, open = "wt")
+  for (i in seq_len(n)) {
+    writeLines(sprintf(">s%d", i - 1L), con)
+    writeLines(seqs[[i]], con)
+  }
+  close(con)
+
+  id <- .vsearch_id_threshold(min_cluster_identity)
+  args <- c(
+    "--cluster_fast", fa,
+    "--id", format(id, digits = 6, trim = TRUE),
+    "--strand", "both",
+    "--iddef", "2",
+    "--uc", uc
+  )
+  out <- system2(vsearch, args = args, stdout = TRUE, stderr = TRUE)
+  status <- attr(out, "status")
+  if (!is.null(status) && !identical(as.integer(status), 0L)) {
+    stop("vsearch failed: ", paste(out, collapse = "\n"))
+  }
+  if (!file.exists(uc)) {
+    stop("vsearch did not produce UC output.")
+  }
+
+  query_to_centroid <- character(n)
+  names(query_to_centroid) <- sprintf("s%d", seq_len(n) - 1L)
+  uc_lines <- readLines(uc, warn = FALSE)
+  for (line in uc_lines) {
+    if (!nzchar(line)) next
+    parts <- strsplit(line, "\t", fixed = TRUE)[[1]]
+    if (length(parts) < 9L) next
+    rec <- parts[[1]]
+    if (rec == "S") {
+      query_to_centroid[parts[[9]]] <- parts[[9]]
+    } else if (rec == "H" && length(parts) >= 10L) {
+      query_to_centroid[parts[[9]]] <- parts[[10]]
+    }
+  }
+
+  centroids <- unique(query_to_centroid[nzchar(query_to_centroid)])
+  if (length(centroids) < 1L) {
+    return(rep(NA_integer_, n))
+  }
+
+  # Rank centroids by cluster size; optionally keep top max_clusters.
+  sizes <- vapply(centroids, function(cen) sum(query_to_centroid == cen, na.rm = TRUE), integer(1))
+  ord <- order(sizes, decreasing = TRUE)
+  if (is.infinite(max_clusters)) {
+    keep <- centroids[ord]
+  } else {
+    keep <- centroids[ord][seq_len(min(length(centroids), as.integer(max_clusters)))]
+  }
+  cen_to_id <- stats::setNames(seq_along(keep), keep)
+
+  cluster_ids <- rep(NA_integer_, n)
+  for (i in seq_len(n)) {
+    q <- sprintf("s%d", i - 1L)
+    cen <- query_to_centroid[[q]]
+    if (is.na(cen) || !nzchar(cen) || !cen %in% names(cen_to_id)) next
+    cluster_ids[[i]] <- cen_to_id[[cen]]
+  }
+  cluster_ids
+}
+
+#' @keywords internal
+.consensus_for_members <- function(members, method) {
+  do_cons <- method %in% c("both", "consensus")
+  if (!do_cons) return(list(seq = members[[1]], method = "greedy"))
+  cons <- .consensus_via_abpoa(members)
+  list(seq = cons, method = "abpoa")
+}
+
+#' @keywords internal
+.exact_modal_purity <- function(members) {
+  members <- as.character(members)
+  members <- members[nzchar(members) & !is.na(members)]
+  if (length(members) < 1L) return(NA_real_)
+  as.numeric(max(table(members))) / length(members)
+}
+
+#' @keywords internal
+.filter_clusters_by_purity <- function(clusters, min_cluster_purity) {
+  if (is.null(min_cluster_purity) || nrow(clusters) < 1L) {
+    return(clusters)
+  }
+  if (!"cluster_purity" %in% names(clusters)) {
+    return(clusters)
+  }
+  keep <- !is.na(clusters$cluster_purity) &
+    clusters$cluster_purity >= as.numeric(min_cluster_purity)
+  out <- clusters[keep, , drop = FALSE]
+  if (nrow(out) < 1L) {
+    return(out)
+  }
+  out$cluster_id <- seq_len(nrow(out))
+  n_gene <- sum(out$n_reads)
+  out$n_reads_gene <- as.integer(n_gene)
+  out$fraction <- out$n_reads / n_gene
+  rownames(out) <- NULL
+  out
+}
+
+#' @keywords internal
+.clusters_from_ids <- function(seqs, cluster_ids, gene_id, sample_id,
+                                 method, min_cluster_reads,
+                                 min_cluster_purity = NULL,
+                                 read_id = NULL) {
+  n_in <- length(seqs)
+  status <- rep(NA_character_, n_in)
+  status[is.na(cluster_ids)] <- "max_clusters_overflow"
+
+  empty_members <- data.frame(
+    sample_id = character(),
+    gene_id = character(),
+    cluster_id = integer(),
+    read_id = character(),
+    seq = character(),
+    stringsAsFactors = FALSE
+  )
+  valid <- !is.na(cluster_ids)
+  if (!any(valid)) {
+    return(list(
+      clusters = data.frame(),
+      members = empty_members,
+      unassigned = .membership_to_unassigned(
+        sample_id, gene_id, read_id, status
+      )
+    ))
+  }
+
+  seqs_v <- as.character(seqs[valid])
+  cluster_ids_v <- cluster_ids[valid]
+  read_ids_v <- if (!is.null(read_id)) {
+    as.character(read_id[valid])
+  } else {
+    paste0("r", which(valid))
+  }
+  valid_idx <- which(valid)
+
+  tab <- sort(table(cluster_ids_v), decreasing = TRUE)
+  below <- names(tab)[tab < as.integer(min_cluster_reads)]
+  if (length(below) > 0L) {
+    for (cid in below) {
+      hit <- valid_idx[cluster_ids_v == as.integer(cid)]
+      status[hit] <- "below_min_cluster_reads"
+    }
+  }
+  tab <- tab[tab >= as.integer(min_cluster_reads)]
+  if (length(tab) < 1L) {
+    return(list(
+      clusters = data.frame(),
+      members = empty_members,
+      unassigned = .membership_to_unassigned(
+        sample_id, gene_id, read_id, status
+      )
+    ))
+  }
+
+  n_gene_reads <- sum(tab)
+  out <- vector("list", length(tab))
+  member_rows <- vector("list", length(tab))
+  retained_orig_cid <- integer(0)
+
+  for (j in seq_along(tab)) {
+    cid <- as.integer(names(tab)[[j]])
+    idx <- cluster_ids_v == cid
+    members <- seqs_v[idx]
+    member_ids <- read_ids_v[idx]
+    n_reads <- as.integer(tab[[j]])
+    purity <- .exact_modal_purity(members)
+    cons <- .consensus_for_members(members = members, method = method)
+    out[[j]] <- data.frame(
+      sample_id = sample_id,
+      gene_id = gene_id,
+      cluster_id = j,
+      seq = cons$seq,
+      n_reads = n_reads,
+      n_reads_gene = as.integer(n_gene_reads),
+      fraction = n_reads / n_gene_reads,
+      fraction_bucket = n_reads / n_in,
+      method = cons$method,
+      cluster_purity = purity,
+      stringsAsFactors = FALSE,
+      .orig_cid = cid
+    )
+    member_rows[[j]] <- data.frame(
+      sample_id = sample_id,
+      gene_id = gene_id,
+      cluster_id = j,
+      read_id = member_ids,
+      seq = members,
+      .orig_cid = cid,
+      stringsAsFactors = FALSE
+    )
+    retained_orig_cid <- c(retained_orig_cid, cid)
+  }
+  clusters <- do.call(rbind, out)
+  members_df <- do.call(rbind, member_rows)
+  clusters <- .filter_clusters_by_purity(clusters, min_cluster_purity)
+
+  pass_orig <- if (nrow(clusters) > 0L && ".orig_cid" %in% names(clusters)) {
+    as.integer(clusters$.orig_cid)
+  } else {
+    integer(0)
+  }
+  dropped_cid <- setdiff(retained_orig_cid, pass_orig)
+  if (length(dropped_cid) > 0L) {
+    for (cid in dropped_cid) {
+      hit <- valid_idx[cluster_ids_v == cid]
+      status[hit] <- "low_cluster_purity"
+    }
+  }
+
+  if (nrow(clusters) > 0L) {
+    orig_to_new <- stats::setNames(
+      as.integer(clusters$cluster_id),
+      as.character(clusters$.orig_cid)
+    )
+    members_df <- members_df[
+      as.character(members_df$.orig_cid) %in% names(orig_to_new),
+      ,
+      drop = FALSE
+    ]
+    members_df$cluster_id <- as.integer(
+      orig_to_new[as.character(members_df$.orig_cid)]
+    )
+    members_df$.orig_cid <- NULL
+    clusters$.orig_cid <- NULL
+    rownames(members_df) <- NULL
+  } else {
+    members_df <- empty_members
+  }
+
+  list(
+    clusters = clusters,
+    members = members_df,
+    unassigned = .membership_to_unassigned(
+      sample_id, gene_id, read_id, status
+    )
+  )
+}
+
+#' @keywords internal
+.membership_to_unassigned <- function(sample_id, gene_id, read_id, status) {
+  if (is.null(read_id) || length(read_id) < 1L) {
+    return(.empty_unassigned_to_cluster())
+  }
+  keep <- !is.na(status)
+  if (!any(keep)) {
+    return(.empty_unassigned_to_cluster())
+  }
+  data.frame(
+    sample_id = as.character(sample_id)[[1]],
+    gene_id = as.character(gene_id)[[1]],
+    read_id = as.character(read_id)[keep],
+    reason = as.character(status)[keep],
+    stringsAsFactors = FALSE
+  )
+}
+
+#' @keywords internal
+.empty_unassigned_to_cluster <- function() {
+  data.frame(
+    sample_id = character(),
+    gene_id = character(),
+    read_id = character(),
+    reason = character(),
+    stringsAsFactors = FALSE
+  )
+}
+
+#' @keywords internal
+.unassigned_rows <- function(sample_id, gene_id, read_id, reason) {
+  if (length(read_id) < 1L) {
+    return(.empty_unassigned_to_cluster())
+  }
+  data.frame(
+    sample_id = as.character(sample_id)[[1]],
+    gene_id = as.character(gene_id)[[1]],
+    read_id = as.character(read_id),
+    reason = as.character(reason)[[1]],
+    stringsAsFactors = FALSE
+  )
+}
+
+#' @keywords internal
+.cluster_and_consensus_reads <- function(seqs, gene_id, sample_id, method,
+                                         min_cluster_reads, max_clusters,
+                                         min_cluster_identity,
+                                         cluster_backend = "vsearch",
+                                         min_cluster_purity = NULL,
+                                         read_id = NULL) {
+  empty <- list(
+    clusters = data.frame(),
+    members = data.frame(
+      sample_id = character(), gene_id = character(),
+      cluster_id = integer(), read_id = character(), seq = character(),
+      stringsAsFactors = FALSE
+    ),
+    unassigned = .empty_unassigned_to_cluster()
+  )
+  if (length(seqs) < 1L) {
+    return(empty)
+  }
+  .cluster_and_consensus_core(
+    seqs = seqs,
+    gene_id = gene_id,
+    sample_id = sample_id,
+    method = method,
+    min_cluster_reads = min_cluster_reads,
+    max_clusters = max_clusters,
+    min_cluster_identity = min_cluster_identity,
+    cluster_backend = cluster_backend,
+    min_cluster_purity = min_cluster_purity,
+    read_id = read_id
+  )
+}
+
+#' @keywords internal
+.cluster_and_consensus_core <- function(seqs, gene_id, sample_id, method,
+                                        min_cluster_reads, max_clusters,
+                                        min_cluster_identity,
+                                        cluster_backend = "vsearch",
+                                        min_cluster_purity = NULL,
+                                        read_id = NULL) {
+  if (!identical(cluster_backend, "vsearch")) {
+    stop("Only cluster_backend = \"vsearch\" is supported.")
+  }
+  cluster_ids <- .cluster_ids_vsearch(
+    seqs = as.character(seqs),
+    min_cluster_identity = min_cluster_identity,
+    max_clusters = max_clusters
+  )
+  .clusters_from_ids(
+    seqs = seqs,
+    cluster_ids = cluster_ids,
+    gene_id = gene_id,
+    sample_id = sample_id,
+    method = method,
+    min_cluster_reads = min_cluster_reads,
+    min_cluster_purity = min_cluster_purity,
+    read_id = read_id
+  )
+}
+
+#' @keywords internal
+.overlap_graph_merge_edit <- function(min_cluster_identity, overlap_min_identity,
+                                      seqs) {
+  lens <- nchar(as.character(seqs))
+  lens <- lens[lens > 0L]
+  med_len <- if (length(lens)) stats::median(lens) else 200
+  id <- min(as.numeric(min_cluster_identity), as.numeric(overlap_min_identity))
+  as.integer(max(floor((1 - id) * med_len), 0L))
+}
+
+#' @keywords internal
+.assemble_overlap_graph_reads <- function(seqs, gene_id, sample_id,
+                                          min_cluster_reads, max_clusters,
+                                          min_cluster_identity,
+                                          overlap_min_identity = 0.90,
+                                          min_cluster_purity = NULL,
+                                          read_id = NULL) {
+  seqs <- as.character(seqs)
+  empty_members <- data.frame(
+    sample_id = character(), gene_id = character(),
+    cluster_id = integer(), read_id = character(), seq = character(),
+    stringsAsFactors = FALSE
+  )
+  empty <- list(
+    clusters = data.frame(),
+    members = empty_members,
+    unassigned = .empty_unassigned_to_cluster()
+  )
+  if (length(seqs) < 1L) {
+    return(empty)
+  }
+
+  merge_edit <- .overlap_graph_merge_edit(
+    min_cluster_identity = min_cluster_identity,
+    overlap_min_identity = overlap_min_identity,
+    seqs = seqs
+  )
+
+  tab <- sort(table(seqs), decreasing = TRUE)
+  uniq <- names(tab)
+  exact_counts <- as.integer(tab)
+
+  kept_idx <- integer(0)
+  for (i in seq_along(uniq)) {
+    if (exact_counts[[i]] < min_cluster_reads) {
+      next
+    }
+    dominated <- FALSE
+    if (length(kept_idx) > 0L) {
+      for (j in kept_idx) {
+        d <- edlib_edit_distance_cpp(
+          uniq[[i]],
+          uniq[[j]],
+          max_edit = merge_edit
+        )
+        if (!is.na(d) && d <= merge_edit) {
+          dominated <- TRUE
+          break
+        }
+      }
+    }
+    if (!dominated) {
+      kept_idx <- c(kept_idx, i)
+    }
+    if (!is.infinite(max_clusters) &&
+        length(kept_idx) >= as.integer(max_clusters)) {
+      break
+    }
+  }
+  if (length(kept_idx) < 1L) {
+    return(list(
+      clusters = data.frame(),
+      members = empty_members,
+      unassigned = .unassigned_rows(
+        sample_id, gene_id, read_id, "below_min_cluster_reads"
+      )
+    ))
+  }
+
+  paths <- uniq[kept_idx]
+  path_counts <- integer(length(paths))
+  path_exact <- integer(length(paths))
+  best_path <- rep(NA_integer_, length(seqs))
+  read_ids <- if (!is.null(read_id)) {
+    as.character(read_id)
+  } else {
+    paste0("r", seq_along(seqs))
+  }
+  for (si in seq_along(seqs)) {
+    s <- seqs[[si]]
+    best <- NA_integer_
+    best_d <- merge_edit + 1L
+    for (p in seq_along(paths)) {
+      d <- edlib_edit_distance_cpp(s, paths[[p]], max_edit = merge_edit)
+      if (!is.na(d) && d <= merge_edit && d < best_d) {
+        best_d <- d
+        best <- p
+      }
+    }
+    if (!is.na(best)) {
+      path_counts[[best]] <- path_counts[[best]] + 1L
+      best_path[[si]] <- best
+      if (identical(s, paths[[best]])) {
+        path_exact[[best]] <- path_exact[[best]] + 1L
+      }
+    }
+  }
+
+  valid <- which(path_counts >= as.integer(min_cluster_reads))
+  if (length(valid) < 1L) {
+    return(list(
+      clusters = data.frame(),
+      members = empty_members,
+      unassigned = .unassigned_rows(
+        sample_id, gene_id, read_id, "below_min_cluster_reads"
+      )
+    ))
+  }
+
+  n_gene_reads <- sum(path_counts[valid])
+  n_in <- length(seqs)
+  out <- lapply(seq_along(valid), function(k) {
+    j <- valid[[k]]
+    n_reads <- as.integer(path_counts[[j]])
+    purity <- if (n_reads > 0L) {
+      as.numeric(path_exact[[j]]) / n_reads
+    } else {
+      NA_real_
+    }
+    data.frame(
+      sample_id = as.character(sample_id)[[1]],
+      gene_id = as.character(gene_id)[[1]],
+      cluster_id = k,
+      seq = paths[[j]],
+      n_reads = n_reads,
+      n_reads_gene = as.integer(n_gene_reads),
+      fraction = path_counts[[j]] / n_gene_reads,
+      fraction_bucket = path_counts[[j]] / n_in,
+      method = "overlap_graph",
+      cluster_purity = purity,
+      stringsAsFactors = FALSE,
+      .path_idx = j
+    )
+  })
+  res <- do.call(rbind, out)
+  rownames(res) <- NULL
+  res <- .filter_clusters_by_purity(res, min_cluster_purity)
+
+  kept_paths <- if (".path_idx" %in% names(res) && nrow(res) > 0L) {
+    as.integer(res$.path_idx)
+  } else {
+    integer(0)
+  }
+  path_to_cid <- if (nrow(res) > 0L) {
+    stats::setNames(as.integer(res$cluster_id), as.character(res$.path_idx))
+  } else {
+    integer(0)
+  }
+  if (".path_idx" %in% names(res)) {
+    res$.path_idx <- NULL
+  }
+
+  status <- rep(NA_character_, length(seqs))
+  mem_list <- list()
+  for (si in seq_along(seqs)) {
+    bp <- best_path[[si]]
+    if (is.na(bp)) {
+      status[[si]] <- "overlap_unmatched"
+    } else if (!(bp %in% valid)) {
+      status[[si]] <- "below_min_cluster_reads"
+    } else if (!(bp %in% kept_paths)) {
+      status[[si]] <- "low_cluster_purity"
+    } else {
+      cid <- as.integer(path_to_cid[[as.character(bp)]])
+      mem_list[[length(mem_list) + 1L]] <- data.frame(
+        sample_id = as.character(sample_id)[[1]],
+        gene_id = as.character(gene_id)[[1]],
+        cluster_id = cid,
+        read_id = read_ids[[si]],
+        seq = seqs[[si]],
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  members_df <- if (length(mem_list)) {
+    do.call(rbind, mem_list)
+  } else {
+    empty_members
+  }
+
+  list(
+    clusters = res,
+    members = members_df,
+    unassigned = .membership_to_unassigned(
+      sample_id, gene_id, read_id, status
+    )
+  )
+}

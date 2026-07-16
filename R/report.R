@@ -3,176 +3,222 @@
 ################################################################################
 
 #' @title Evaluate MIAO results
-#' @description This function evaluates the results of the MIAO pipeline and generates a summary report.
-#' @param out_dir The output directory where MIAO results are stored.
-#' @param output_reads Logical. If TRUE, outputs the sequences of non-indexed aligned reads to a FASTA file.
-#' @return A summary report saved in the output directory.
-#'
-#' @importFrom Biostrings readDNAStringSet writeXStringSet DNAStringSet
-#' @importFrom dplyr left_join full_join
-#'
+#' @description Summarize demultiplex, amplicon resolve, and edit-calling outputs
+#'   under a single run directory.
+#' @param out_dir Output directory containing `demultiplex/`, and optionally
+#'   `amplicon_assign/`, `amplicon/`, and `editcall/` subdirectories.
+#' @param output_reads If `TRUE`, write read IDs that received no gene assignment
+#'   to `miao_summary/amplicon_unassigned_read_ids.tsv`.
+#' @return Invisibly, the path to `miao_summary/`.
+#' @importFrom utils read.delim write.table
 #' @export
-#'
-evalMiao <- function(out_dir, output_reads){
-    basecall_dir <- file.path(out_dir, "basecall")
-    basecall_tsv <- file.path(basecall_dir, "basecalls_summary.tsv")
-    n_raw_read <- length(count.fields(file = basecall_tsv))
-
-    basecall_fn <- list.files(path = basecall_dir,
-                              pattern = "basecall_filt_sizeselected_reads_.+.fa$",
-                              full.names = TRUE)
-    for(i in seq_along(basecall_fn)){
-        if(i == 1){
-            basecall_out <- readDNAStringSet(basecall_fn[i])
-        } else {
-            basecall_out <- c(basecall_out,
-                              readDNAStringSet(basecall_fn[i]))
-        }
-    }
-    n_filt_read <- length(basecall_out)
-
+evalMiao <- function(out_dir, output_reads = FALSE) {
     demult_dir <- file.path(out_dir, "demultiplex")
-    demult_fn <- file.path(demult_dir, "demultiplex_list.csv")
-    demult_out <- read.csv(file = demult_fn)
-    n_demult_reads <- length(unique(demult_out$sseqid))
-    n_dup_index_reads <- sum(duplicated(demult_out$sseqid))
-
-    demult_dir <- file.path(out_dir, "demultiplex")
-    undemult_fn <- file.path(demult_dir, "undemultiplex_list.csv")
-    undemult_out <- read.csv(file = undemult_fn)
-
-    n_undemult <- nrow(undemult_out)
-    n_indexed_both_side <- sum(undemult_out$qstart.f <= 15 & undemult_out$qstart.r <= 15, na.rm = TRUE)
-    n_indexed_one_side <- sum(undemult_out$qstart.f <= 15 | undemult_out$qstart.r <= 15, na.rm = TRUE)
-    n_not_indexed <- sum(undemult_out$qstart.f > 15 & undemult_out$qstart.r > 15, na.rm = TRUE)
-
-    n_demult_reads <- length(unique(demult_out$sseqid))
-    n_dup_index_reads <- sum(duplicated(demult_out$sseqid))
-
-    n_indexed_reads_per_index_f <- table(demult_out$qseqid.f)
-    prop_indexed_reads_per_index_f <- n_indexed_reads_per_index_f / sum(n_indexed_reads_per_index_f)
-    n_indexed_reads_per_index_r <- table(demult_out$qseqid.r)
-    prop_indexed_reads_per_index_r <- n_indexed_reads_per_index_r / sum(n_indexed_reads_per_index_r)
-
-    align_dir <- file.path(out_dir, "align")
-    align_fn <- file.path(align_dir, "alignment_list.csv")
-    align_out <- read.csv(file = align_fn)
-    n_align_reads <- length(unique(align_out$read_name))
-    n_dup_align_reads <- sum(duplicated(align_out$read_name))
-    n_align_reads_per_gene <- table(align_out$target_gene)
-    prop_align_reads_per_gene <- signif(n_align_reads_per_gene / sum(n_align_reads_per_gene), 3)
-
+    amplicon_assign_dir <- file.path(out_dir, "amplicon_assign")
+    amplicon_dir <- file.path(out_dir, "amplicon")
     editcall_dir <- file.path(out_dir, "editcall")
-    editcall_fn <- file.path(editcall_dir, "editcall_filtered.csv")
-    editcall_out <- read.csv(file = editcall_fn)
-    n_edicall_reads <- sum(editcall_out$count)
-    n_edicall_reads_per_gene <- tapply(editcall_out$count,
-                                       editcall_out$target_gene,
-                                       sum)
-    prop_edicall_reads_per_gene <- n_edicall_reads_per_gene / n_align_reads_per_gene
-
-    non_indexed_aligned_reads <- undemult_out$sseqid[undemult_out$qstart.f > 15 & undemult_out$qstart.r > 15]
-    non_indexed_aligned_reads <- align_out$read_name %in% non_indexed_aligned_reads
-    n_non_indexed_aligned_reads_per_gene <- table(align_out$target_gene[non_indexed_aligned_reads])
-    prop_non_indexed_aligned_reads_per_gene <- n_non_indexed_aligned_reads_per_gene / n_align_reads_per_gene
-
-    if(output_reads){
-        non_indexed_aligned_read_names <- align_out$read_name[non_indexed_aligned_reads]
-        non_indexed_aligned_read_seq <- basecall_out[names(basecall_out) %in% non_indexed_aligned_read_names]
-        writeXStringSet(non_indexed_aligned_read_seq, file.path(out_dir, "non_indexed_aligned_read_seq.fa"))
-    }
-
     summary_dir <- file.path(out_dir, "miao_summary")
     dir.create(summary_dir, showWarnings = FALSE, recursive = TRUE)
 
-    out1 <- rbind(c("Raw reads: ", n_raw_read, ""),
-                  c("Reads after filtering: ",
-                    n_filt_read,
-                    signif(n_filt_read / n_raw_read, 3) * 100),
-                  c("Demultiplexed reads: ",
-                    n_demult_reads,
-                    signif(n_demult_reads / n_raw_read, 3) * 100),
-                  c("Aligned reads: ",
-                    n_align_reads,
-                    signif(n_align_reads / n_raw_read, 3) * 100),
-                  c("Editcalled reads: ",
-                    n_edicall_reads,
-                    signif(n_edicall_reads / n_raw_read, 3) * 100),
-                  c("Undemultiplexed reads: ",
-                    n_undemult,
-                    signif(n_undemult / n_raw_read, 3) * 100),
-                  c("Undemultiplexed reads (umbiguously indexed): ",
-                    n_indexed_both_side,
-                    signif(n_indexed_both_side / n_raw_read, 3) * 100),
-                  c("Undemultiplexed reads (single index): ",
-                    n_indexed_one_side,
-                    signif(n_indexed_one_side / n_raw_read, 3) * 100),
-                  c("Undemultiplexed reads (no index): ",
-                    n_not_indexed,
-                    signif(n_not_indexed / n_raw_read, 3) * 100))
-    write.table(x = out1, file = file.path(summary_dir, "read_stats.tsv"),
-                row.names = FALSE, col.names = FALSE, sep = "\t")
+    assignments_fn <- file.path(demult_dir, "assignments.tsv")
+    if (!file.exists(assignments_fn)) {
+        stop("Cannot find demultiplex assignments: ", assignments_fn)
+    }
+    assignments <- utils::read.delim(assignments_fn, stringsAsFactors = FALSE)
 
-    out2 <- rbind(names(n_indexed_reads_per_index_f),
-                  n_indexed_reads_per_index_f,
-                  signif(prop_indexed_reads_per_index_f, 3) * 100,
-                  names(n_indexed_reads_per_index_f),
-                  n_indexed_reads_per_index_r,
-                  signif(prop_indexed_reads_per_index_r, 3) * 100)
-    out2 <- cbind(c("",
-                    "Indexed reads per forward index",
-                    "Proportion of indexed reads per forward index",
-                    "",
-                    "Indexed reads per reverse index",
-                    "Proportion of indexed reads per reverse index"),
-                  out2)
-    write.table(x = out2, file = file.path(summary_dir, "indexed_reads_per_gene.tsv"),
-                row.names = FALSE, col.names = FALSE, sep = "\t")
+    unassigned_fn <- file.path(demult_dir, "unassigned.tsv")
+    unassigned <- if (file.exists(unassigned_fn)) {
+        utils::read.delim(unassigned_fn, stringsAsFactors = FALSE)
+    } else {
+        data.frame(read_id = character(), reason = character(), stringsAsFactors = FALSE)
+    }
 
-    out3 <- rbind(names(n_align_reads_per_gene),
-                  n_align_reads_per_gene,
-                  signif(prop_align_reads_per_gene, 3) * 100,
-                  n_edicall_reads_per_gene,
-                  signif(prop_edicall_reads_per_gene, 3) * 100,
-                  n_non_indexed_aligned_reads_per_gene,
-                  signif(prop_non_indexed_aligned_reads_per_gene, 3) * 100)
-    out3 <- cbind(c("",
-                    "Aligned reads per gene",
-                    "Proportion of aligned reads per gene",
-                    "Editcalled reads per gene",
-                    "Proportion of editcalled reads per gene",
-                    "Non-indexed reads per gene",
-                    "Proportion of non-indexed reads per gene"),
-                  out3)
-    write.table(x = out3, file = file.path(summary_dir, "aligned_reads_per_gene.tsv"),
-                row.names = FALSE, col.names = FALSE, sep = "\t")
+    n_demult_reads <- nrow(assignments)
+    n_undemult <- nrow(unassigned)
+    n_input_reads <- n_demult_reads + n_undemult
+
+    n_unassign_by_reason <- table(unassigned$reason)
+    n_indexed_reads_per_index_f <- table(assignments$f_index_id)
+    n_indexed_reads_per_index_r <- table(assignments$r_index_id)
+    prop_indexed_reads_per_index_f <- n_indexed_reads_per_index_f / sum(n_indexed_reads_per_index_f)
+    prop_indexed_reads_per_index_r <- n_indexed_reads_per_index_r / sum(n_indexed_reads_per_index_r)
+
+    gene_assignments <- NULL
+    gene_assignments_fn <- file.path(amplicon_assign_dir, "gene_assignments.tsv")
+    if (!file.exists(gene_assignments_fn)) {
+        gene_assignments_fn <- file.path(amplicon_dir, "gene_assignments.tsv")
+    }
+    if (file.exists(gene_assignments_fn)) {
+        gene_assignments <- utils::read.delim(gene_assignments_fn, stringsAsFactors = FALSE)
+    }
+
+    n_gene_assigned_reads <- NA_integer_
+    n_gene_unassigned_reads <- NA_integer_
+    n_gene_reads_per_gene <- NULL
+    prop_gene_reads_per_gene <- NULL
+    if (!is.null(gene_assignments) && nrow(gene_assignments) > 0L) {
+        is_assigned <- !is.na(gene_assignments$gene_id) &
+            gene_assignments$gene_id != "" &
+            gene_assignments$gene_id != "NA"
+        n_gene_assigned_reads <- sum(is_assigned)
+        n_gene_unassigned_reads <- sum(!is_assigned)
+        n_gene_reads_per_gene <- table(gene_assignments$gene_id[is_assigned])
+        prop_gene_reads_per_gene <- signif(
+            n_gene_reads_per_gene / sum(n_gene_reads_per_gene),
+            3
+        )
+    }
+
+    n_edicall_reads <- NA_integer_
+    n_edicall_reads_per_gene <- NULL
+    prop_edicall_reads_per_gene <- NULL
+    editcall_fn <- file.path(editcall_dir, "editcall_filtered.csv")
+    if (file.exists(editcall_fn)) {
+        editcall_out <- utils::read.csv(editcall_fn, stringsAsFactors = FALSE)
+        n_edicall_reads <- sum(editcall_out$count)
+        n_edicall_reads_per_gene <- tapply(
+            editcall_out$count,
+            editcall_out$target_gene,
+            sum
+        )
+        if (!is.null(n_gene_reads_per_gene)) {
+            common_genes <- intersect(
+                names(n_gene_reads_per_gene),
+                names(n_edicall_reads_per_gene)
+            )
+            prop_edicall_reads_per_gene <- n_edicall_reads_per_gene[common_genes] /
+                n_gene_reads_per_gene[common_genes]
+        }
+    }
+
+    if (isTRUE(output_reads) && !is.null(gene_assignments)) {
+        unassigned_gene_reads <- gene_assignments$read_id[
+            is.na(gene_assignments$gene_id) |
+                gene_assignments$gene_id == "" |
+                gene_assignments$gene_id == "NA"
+        ]
+        utils::write.table(
+            data.frame(read_id = unassigned_gene_reads),
+            file.path(summary_dir, "amplicon_unassigned_read_ids.tsv"),
+            sep = "\t", row.names = FALSE, quote = FALSE
+        )
+    }
+
+  pct <- function(x, denom) {
+    if (is.na(x) || is.na(denom) || denom == 0L) {
+      return(NA)
+    }
+    signif(x / denom, 3) * 100
+  }
+
+    out1 <- rbind(
+        c("Input reads: ", n_input_reads, ""),
+        c("Demultiplexed reads: ", n_demult_reads, pct(n_demult_reads, n_input_reads)),
+        c("Gene-assigned reads: ", n_gene_assigned_reads, pct(n_gene_assigned_reads, n_input_reads)),
+        c("Amplicon unassigned reads: ", n_gene_unassigned_reads, pct(n_gene_unassigned_reads, n_input_reads)),
+        c("Editcalled reads: ", n_edicall_reads, pct(n_edicall_reads, n_input_reads)),
+        c("Undemultiplexed reads: ", n_undemult, pct(n_undemult, n_input_reads))
+    )
+    if (length(n_unassign_by_reason) > 0L) {
+        reason_rows <- cbind(
+            paste0("Undemultiplexed (", names(n_unassign_by_reason), "): "),
+            as.character(n_unassign_by_reason),
+            signif(as.numeric(n_unassign_by_reason) / n_input_reads, 3) * 100
+        )
+        out1 <- rbind(out1, reason_rows)
+    }
+    utils::write.table(
+        out1,
+        file.path(summary_dir, "read_stats.tsv"),
+        row.names = FALSE, col.names = FALSE, sep = "\t", quote = FALSE
+    )
+
+    out2 <- rbind(
+        names(n_indexed_reads_per_index_f),
+        n_indexed_reads_per_index_f,
+        signif(prop_indexed_reads_per_index_f, 3) * 100,
+        names(n_indexed_reads_per_index_r),
+        n_indexed_reads_per_index_r,
+        signif(prop_indexed_reads_per_index_r, 3) * 100
+    )
+    out2 <- cbind(
+        c(
+            "",
+            "Indexed reads per forward index",
+            "Proportion of indexed reads per forward index",
+            "",
+            "Indexed reads per reverse index",
+            "Proportion of indexed reads per reverse index"
+        ),
+        out2
+    )
+    utils::write.table(
+        out2,
+        file.path(summary_dir, "indexed_reads_per_index.tsv"),
+        row.names = FALSE, col.names = FALSE, sep = "\t", quote = FALSE
+    )
+
+    if (!is.null(n_gene_reads_per_gene)) {
+        gene_names <- names(n_gene_reads_per_gene)
+        out3 <- rbind(
+            gene_names,
+            as.character(n_gene_reads_per_gene),
+            as.character(prop_gene_reads_per_gene)
+        )
+        out3_labels <- c(
+            "",
+            "Gene-assigned reads per gene",
+            "Proportion of gene-assigned reads per gene"
+        )
+        if (!is.null(n_edicall_reads_per_gene)) {
+            editcall_vals <- ifelse(
+                gene_names %in% names(n_edicall_reads_per_gene),
+                as.character(n_edicall_reads_per_gene[gene_names]),
+                NA_character_
+            )
+            prop_vals <- ifelse(
+                gene_names %in% names(prop_edicall_reads_per_gene),
+                as.character(signif(prop_edicall_reads_per_gene[gene_names], 3)),
+                NA_character_
+            )
+            out3 <- rbind(out3, editcall_vals, prop_vals)
+            out3_labels <- c(
+                out3_labels,
+                "Editcalled reads per gene",
+                "Proportion of editcalled reads per gene-assigned reads"
+            )
+        }
+        out3 <- cbind(out3_labels, out3)
+        utils::write.table(
+            out3,
+            file.path(summary_dir, "gene_reads_per_gene.tsv"),
+            row.names = FALSE, col.names = FALSE, sep = "\t", quote = FALSE
+        )
+    }
+
+    invisible(summary_dir)
 }
 
 #' Visualize edit-calling results per plate as PDF heatmaps
 #'
-#' This function takes the edit-calling summary and produces per-plate PDF
-#' heatmaps summarizing genotype categories per target for each sample well.
+#' Reads `editcall/editcall_summary.csv` and draws per-plate genotype heatmaps.
+#' Genotype labels (`ref` / `sub` / `delN` / `insN` / `indelD-I`) are parsed
+#' structurally; SNP (`sub`) is never treated as frameshift. In-frame classes
+#' use **net indel length mod 3** (not CDS phase).
 #'
 #' @param out_dir Output directory of a completed run. Must contain
-#'   `editcall/editcall_summary.csv` with the same structure as `edit_result`.
-#'   PDFs will be saved into `file.path(out_dir, "editviewer")`.
-#' @param sample_list Path to a CSV file mapping index pairs to sample and plate
-#'   layout. This file is expected to have NO header and exactly five columns in
-#'   this order:
-#'   1) `index_pair_id`, 2) `sample_name`, 3) `plate_id`, 4) `row_id`,
-#'   5) `col_id`. Example rows:
-#'
-#'   miaoBC0001,Sample_A,1,A,1
-#'   miaoBC0002,Sample_B,1,A,2
-#'
-#'   The values are used to annotate plots (sample name) and to facet by plate
-#'   and well coordinates (row, col).
-#' @param onefile If TRUE, draw plots in one PDF file, otherwise separate PDF files.
-#' @param fill_plate If TRUE, fill missing wells on the plate layout.
+#'   `editcall/editcall_summary.csv`. PDFs are written to `editviewer/`.
+#' @param sample_list Path to a headerless CSV with five columns:
+#'   `index_pair_id`, sample name, plate id, row id (`A`–`H`), column id (`1`–`12`).
+#'   This must be a plate layout file, not `index_list.csv`. When `NULL`, layout
+#'   is taken from `editcall_summary.csv` only if `row_id` / `col_id` already
+#'   look like well coordinates.
+#' @param onefile If `TRUE`, draw plots in one PDF file, otherwise separate PDF files.
+#' @param fill_plate If `TRUE`, fill missing wells on the plate layout.
 #' @return Invisibly, a character vector of generated PDF file paths.
 #' @export
-editViewer <- function(out_dir, sample_list, onefile = FALSE, fill_plate = TRUE){
-    if(!dir.exists(out_dir)){
+editViewer <- function(out_dir, sample_list = NULL, onefile = FALSE, fill_plate = TRUE) {
+    if (!dir.exists(out_dir)) {
         stop("out_dir does not exist: ", out_dir)
     }
 
@@ -180,140 +226,285 @@ editViewer <- function(out_dir, sample_list, onefile = FALSE, fill_plate = TRUE)
     dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
 
     csv_fn <- file.path(out_dir, "editcall", "editcall_summary.csv")
-    if(!file.exists(csv_fn)){
+    if (!file.exists(csv_fn)) {
         stop("Cannot find editcall summary: ", csv_fn)
     }
-    edit_result <- read.csv(csv_fn)
+    edit_result <- utils::read.csv(csv_fn, stringsAsFactors = FALSE)
+    edit_result <- edit_result[edit_result$data_type == "genotype", , drop = FALSE]
+    edit_result$data_type <- NULL
 
-    edit_result <- subset(edit_result,
-                          select = -data_type,
-                          subset = data_type == "genotype")
+    meta_cols <- c(
+        "index_pair_id", "sample_name", "plate_id", "row_id", "col_id", "total_reads"
+    )
+    gene_cols <- setdiff(names(edit_result), meta_cols)
 
-    sample_list <- read.csv(sample_list, header = FALSE)
-    hit <- match(edit_result$index_pair_id, sample_list$V1)
-    edit_result$name <- sample_list$V2[hit]
-    edit_result$plate <- sample_list$V3[hit]
-    edit_result$row <- sample_list$V4[hit]
-    edit_result$col <- sample_list$V5[hit]
+    if (!is.null(sample_list)) {
+        layout <- .read_plate_layout(sample_list)
+        edit_result <- .join_plate_layout(edit_result, layout)
+    } else if (.has_valid_plate_layout(edit_result)) {
+        edit_result$name <- if ("sample_name" %in% names(edit_result)) {
+            edit_result$sample_name
+        } else {
+            edit_result$index_pair_id
+        }
+        edit_result$plate <- edit_result$plate_id
+        edit_result$row <- toupper(trimws(as.character(edit_result$row_id)))
+        edit_result$col <- as.character(suppressWarnings(as.integer(edit_result$col_id)))
+    } else {
+        stop(
+            "Plate layout is missing or invalid in editcall_summary.csv. ",
+            "Pass sample_list with columns: index_pair_id, sample_name, plate, ",
+            "row (A-H), col (1-12). Do not use index_list.csv."
+        )
+    }
 
-    if("total_reads" %in% names(edit_result)){
+    if (nrow(edit_result) < 1L) {
+        stop("No samples with valid plate layout to plot.")
+    }
+
+    if ("total_reads" %in% names(edit_result)) {
         edit_result$total_reads_display <- paste0("n=", edit_result$total_reads)
     } else {
         edit_result$total_reads_display <- ""
     }
-    edit_result_pat <- apply(subset(edit_result,
-                                    select = -c(index_pair_id, name:col)),
-                             1,
-                             paste,
-                             collapse = "_")
-    dup_list <- tapply(seq_along(edit_result_pat), sub("_.+", "", edit_result$name), function(i){
-        dup <- !duplicated(edit_result_pat[i])
-        out <- data.frame(i = i, dup = dup)
-        return(out)
+
+    edit_result$uniq <- ""
+    edit_result_pat <- apply(
+        edit_result[, gene_cols, drop = FALSE],
+        1,
+        paste,
+        collapse = "_"
+    )
+    dup_list <- tapply(seq_along(edit_result_pat), edit_result$name, function(i) {
+        data.frame(i = i, dup = !duplicated(edit_result_pat[i]))
     })
     dup_list <- do.call("rbind", dup_list)
-    dup_list <- dup_list[order(dup_list$i), ]
+    dup_list <- dup_list[order(dup_list$i), , drop = FALSE]
     edit_result$uniq <- "Dup"
     edit_result$uniq[dup_list$dup] <- "Uniq"
     edit_result$uniq[edit_result$name == "" | is.na(edit_result$name)] <- ""
-    long_edit_result <- tidyr::pivot_longer(edit_result,
-                                            cols = -c(index_pair_id, sample_name:uniq),
-                                            names_to = "gene",
-                                            values_to = "edit")
 
-    long_edit_result$edit_eval <- sapply(long_edit_result$edit, function(x){
-        x <- unlist(strsplit(x, "/"))
-        if(all(is.na(x))){
-            return(NA)
-        }
-        x1 <- gsub("[0-9]", "", x)
-        x2 <- as.numeric(gsub("[a-zA-Z]", "", x))
-        is_ref <- x1 %in% "ref"
-        is_inframe <- x2 %% 3 %in% 0
-        if(all(is_ref)){
-            return("ref")
-        } else if(all(!is_ref)){
-            if(all(!is_inframe)){
-                return("alt")
-            } else if(all(is_inframe)){
-                return("alt_inframe_homo")
-            } else {
-                return("alt_inframe_het")
-            }
-        } else {
-            if(all(!is_inframe)){
-                return("het")
-            } else {
-                return("het_inframe")
-            }
-        }
-    })
+    long_edit_result <- tidyr::pivot_longer(
+        edit_result,
+        cols = dplyr::all_of(gene_cols),
+        names_to = "gene",
+        values_to = "edit"
+    )
 
-    eval_levels <- c("ref",
-                     "alt", "alt_inframe_het", "alt_inframe_homo",
-                     "het", "het_inframe")
+    long_edit_result$edit_eval <- vapply(
+        long_edit_result$edit,
+        .classify_genotype_edit_eval,
+        character(1)
+    )
+
+    eval_levels <- c(
+        "ref",
+        "alt", "alt_inframe_het", "alt_inframe_homo",
+        "het", "het_inframe"
+    )
     long_edit_result$edit_eval <- factor(long_edit_result$edit_eval, eval_levels)
     n_gene <- length(unique(long_edit_result$gene))
 
-    if(fill_plate){
-        wells <- paste(long_edit_result$plate,
-                       long_edit_result$row,
-                       long_edit_result$col, sep = "_")
-        all_wells <- expand.grid(plate = unique(long_edit_result$plate),
-                                 row = LETTERS[1:8],
-                                 col = as.character(1:12))
+    long_edit_result$col <- as.character(long_edit_result$col)
+    long_edit_result$row <- as.character(long_edit_result$row)
+    long_edit_result$plate <- as.character(long_edit_result$plate)
+
+    if (fill_plate) {
+        wells <- paste(
+            long_edit_result$plate,
+            long_edit_result$row,
+            long_edit_result$col,
+            sep = "_"
+        )
+        all_wells <- expand.grid(
+            plate = unique(long_edit_result$plate),
+            row = LETTERS[1:8],
+            col = as.character(1:12),
+            stringsAsFactors = FALSE
+        )
         all_wells_id <- apply(all_wells, 1, paste, collapse = "_")
         missing_wells <- !all_wells_id %in% wells
-        add_result <- long_edit_result[rep(1, sum(missing_wells)), ]
-        add_result$name <- add_result$total_reads_display <- add_result$edit_eval <- add_result$uniq <- NA
-        add_result$plate <- all_wells$plate[missing_wells]
-        add_result$row <- all_wells$row[missing_wells]
-        add_result$col <- all_wells$col[missing_wells]
-        add_result <- lapply(unique(long_edit_result$gene), function(x){
-            add_result$gene <- x
-            return(add_result)
-        })
-        add_result <- do.call(rbind, add_result)
-        long_edit_result <- rbind(long_edit_result, add_result)
+        if (any(missing_wells)) {
+            add_result <- long_edit_result[rep(1L, sum(missing_wells)), , drop = FALSE]
+            add_result$name <- add_result$total_reads_display <- NA_character_
+            add_result$edit_eval <- add_result$uniq <- NA_character_
+            add_result$plate <- all_wells$plate[missing_wells]
+            add_result$row <- all_wells$row[missing_wells]
+            add_result$col <- all_wells$col[missing_wells]
+            add_result <- do.call(
+                "rbind",
+                lapply(unique(long_edit_result$gene), function(g) {
+                    add_result$gene <- g
+                    add_result
+                })
+            )
+            long_edit_result <- rbind(long_edit_result, add_result)
+        }
     }
 
-    long_edit_result$col <- factor(long_edit_result$col, 1:12)
+    long_edit_result$col <- factor(long_edit_result$col, levels = as.character(1:12))
+
     out_files <- character(0)
-    if(onefile){
+    if (onefile) {
         pdf_fn <- file.path(plot_dir, "edit_viewer_plate.pdf")
-        pdf(pdf_fn, width = 11.69, height = 8.27)
+        grDevices::pdf(pdf_fn, width = 11.69, height = 8.27)
     }
-    for(i in unique(long_edit_result$plate)){
+    for (i in unique(long_edit_result$plate)) {
         p <- ggplot2::ggplot(subset(long_edit_result, plate == i)) +
             ggplot2::geom_tile(ggplot2::aes(x = gene, y = 0, fill = edit_eval)) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 2, label = name), vjust = 1, hjust = 0.5, size = 4) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 1.4, label = uniq), vjust = 1, hjust = 0.5, size = 3) +
-            ggplot2::geom_text(ggplot2::aes(x = (n_gene + 1) / 2, y = 0.9, label = total_reads_display), vjust = 1, hjust = 0.5, size = 3) +
-            ggplot2::facet_grid(rows = ggplot2::vars(row), cols = ggplot2::vars(col), switch = "y", drop = FALSE) +
-            ggplot2::scale_fill_manual(values = c("yellow", "darkblue", "blue",
-                                                  "lightblue", "darkgreen", "green"),
-                                       breaks = eval_levels,
-                                       name = NULL) +
+            ggplot2::geom_text(
+                ggplot2::aes(x = (n_gene + 1) / 2, y = 2, label = name),
+                vjust = 1, hjust = 0.5, size = 4
+            ) +
+            ggplot2::geom_text(
+                ggplot2::aes(x = (n_gene + 1) / 2, y = 1.4, label = uniq),
+                vjust = 1, hjust = 0.5, size = 3
+            ) +
+            ggplot2::geom_text(
+                ggplot2::aes(x = (n_gene + 1) / 2, y = 0.9, label = total_reads_display),
+                vjust = 1, hjust = 0.5, size = 3
+            ) +
+            ggplot2::facet_grid(
+                rows = ggplot2::vars(row),
+                cols = ggplot2::vars(col),
+                switch = "y",
+                drop = FALSE
+            ) +
+            ggplot2::scale_fill_manual(
+                values = c("yellow", "darkblue", "blue", "lightblue", "darkgreen", "green"),
+                breaks = eval_levels,
+                name = NULL
+            ) +
             ggplot2::labs(title = paste0("Plate ", i)) +
-            ggplot2::theme(axis.title = ggplot2::element_blank(),
-                           axis.text.y = ggplot2::element_blank(),
-                           axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, size = 7),
-                           axis.ticks.y = ggplot2::element_blank(),
-                           panel.grid = ggplot2::element_blank())
+            ggplot2::theme(
+                axis.title = ggplot2::element_blank(),
+                axis.text.y = ggplot2::element_blank(),
+                axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, size = 7),
+                axis.ticks.y = ggplot2::element_blank(),
+                panel.grid = ggplot2::element_blank()
+            )
 
-        if(!onefile){
+        if (!onefile) {
             pdf_fn <- file.path(plot_dir, paste0("edit_viewer_plate", i, ".pdf"))
-            pdf(pdf_fn, width = 11.69, height = 8.27)
+            grDevices::pdf(pdf_fn, width = 11.69, height = 8.27)
             print(p)
-            dev.off()
+            grDevices::dev.off()
         } else {
             print(p)
         }
         out_files <- c(out_files, pdf_fn)
     }
 
-    if(onefile){
-        dev.off()
+    if (onefile) {
+        grDevices::dev.off()
     }
     invisible(out_files)
+}
+
+################################################################################
+# Genotype label parsing for editViewer (net indel length class, not CDS frame)
+################################################################################
+
+#' Parse one allele label from editcall summary genotype strings.
+#'
+#' Recognized forms: `ref`, `sub`, `delN`, `insN`, `indelD-I`.
+#' @keywords internal
+.parse_allele_label <- function(label) {
+    label <- as.character(label)[[1]]
+    if (is.na(label) || !nzchar(label)) {
+        return(list(
+            type = NA_character_,
+            n_del = NA_integer_,
+            n_ins = NA_integer_,
+            is_ref = NA,
+            is_frameshift = NA
+        ))
+    }
+    if (identical(label, "ref")) {
+        return(list(
+            type = "ref", n_del = 0L, n_ins = 0L,
+            is_ref = TRUE, is_frameshift = FALSE
+        ))
+    }
+    if (identical(label, "sub")) {
+        return(list(
+            type = "sub", n_del = 0L, n_ins = 0L,
+            is_ref = FALSE, is_frameshift = FALSE
+        ))
+    }
+    m_del <- regexec("^del([0-9]+)$", label)
+    if (m_del[[1]][1] >= 0L) {
+        n <- as.integer(regmatches(label, m_del)[[1]][2])
+        return(list(
+            type = "del", n_del = n, n_ins = 0L,
+            is_ref = FALSE, is_frameshift = (n %% 3L) != 0L
+        ))
+    }
+    m_ins <- regexec("^ins([0-9]+)$", label)
+    if (m_ins[[1]][1] >= 0L) {
+        n <- as.integer(regmatches(label, m_ins)[[1]][2])
+        return(list(
+            type = "ins", n_del = 0L, n_ins = n,
+            is_ref = FALSE, is_frameshift = (n %% 3L) != 0L
+        ))
+    }
+    m_indel <- regexec("^indel([0-9]+)-([0-9]+)$", label)
+    if (m_indel[[1]][1] >= 0L) {
+        parts <- regmatches(label, m_indel)[[1]]
+        n_del <- as.integer(parts[2])
+        n_ins <- as.integer(parts[3])
+        net <- abs(n_ins - n_del)
+        return(list(
+            type = "indel", n_del = n_del, n_ins = n_ins,
+            is_ref = FALSE, is_frameshift = (net %% 3L) != 0L
+        ))
+    }
+    # Unrecognized label: treat as non-ref frameshift so it cannot look "clean".
+    list(
+        type = "unknown", n_del = NA_integer_, n_ins = NA_integer_,
+        is_ref = FALSE, is_frameshift = TRUE
+    )
+}
+
+#' Classify a genotype string (alleles joined by `/`) for plate coloring.
+#'
+#' Uses net indel length mod 3 for frameshift classes. `sub` is length-neutral
+#' (never frameshift). This is not a CDS-phase codon model.
+#' @keywords internal
+.classify_genotype_edit_eval <- function(genotype) {
+    if (length(genotype) != 1L || is.na(genotype) || !nzchar(as.character(genotype))) {
+        return(NA_character_)
+    }
+    alleles <- unlist(strsplit(as.character(genotype), "/", fixed = TRUE), use.names = FALSE)
+    alleles <- alleles[nzchar(alleles) & !is.na(alleles)]
+    if (length(alleles) < 1L) {
+        return(NA_character_)
+    }
+    parsed <- lapply(alleles, .parse_allele_label)
+    is_ref <- vapply(parsed, function(p) isTRUE(p$is_ref), logical(1))
+    is_fs <- vapply(parsed, function(p) isTRUE(p$is_frameshift), logical(1))
+
+    if (all(is_ref)) {
+        return("ref")
+    }
+
+    alt_fs <- is_fs[!is_ref]
+    if (length(alt_fs) < 1L) {
+        return(NA_character_)
+    }
+    alt_inframe <- !alt_fs
+
+    if (all(!is_ref)) {
+        if (all(alt_fs)) {
+            "alt"
+        } else if (all(alt_inframe)) {
+            "alt_inframe_homo"
+        } else {
+            "alt_inframe_het"
+        }
+    } else if (all(alt_fs)) {
+        "het"
+    } else {
+        "het_inframe"
+    }
 }

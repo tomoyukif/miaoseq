@@ -5,6 +5,7 @@
 #include "demux_internal.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -19,7 +20,6 @@ struct EndHit {
     bool ok = false;
     int parent_id = -1;
     int barcode_edit = -1;
-    int prefix_edit = -1;
     int anchor_edit = -1;
 };
 
@@ -32,13 +32,10 @@ bool better_hit(const EndHit& a, const EndHit& b) {
 
 EndHit match_end(const std::string& window,
                  const std::string& suffix,
-                 const std::string& prefix,
                  int barcode_len,
                  const MutantDict& dict,
                  int max_anchor_edit,
-                 int max_prefix_edit,
                  bool allow_revcomp,
-                 bool check_prefix,
                  bool* saw_suffix,
                  long long* n_edlib) {
     EndHit best;
@@ -60,11 +57,6 @@ EndHit match_end(const std::string& window,
             cand.parent_id = hit.parent_id;
             cand.barcode_edit = hit.edit;
             cand.anchor_edit = anchor.edit;
-            if (check_prefix) {
-                int bc_start = anchor.start - barcode_len + off;
-                cand.prefix_edit = optional_prefix_edit(
-                    anchor.seq, prefix, bc_start, max_prefix_edit, n_edlib);
-            }
             if (better_hit(cand, best)) best = cand;
             if (best.ok && best.barcode_edit == 0 && best.anchor_edit == 0) return best;
         }
@@ -80,17 +72,13 @@ struct ReadEnds {
 ReadEnds scan_ends(const std::string& seq_raw,
                    const std::string& f_suffix,
                    const std::string& r_suffix,
-                   const std::string& f_prefix,
-                   const std::string& r_prefix,
                    int f_bc_len,
                    int r_bc_len,
                    const MutantDict& f_dict,
                    const MutantDict& r_dict,
                    int end_window,
                    int max_anchor_edit,
-                   int max_prefix_edit,
                    bool allow_revcomp,
-                   bool check_prefix,
                    long long* n_edlib) {
     ReadEnds ends;
     std::string seq = to_upper_acgt(seq_raw);
@@ -100,24 +88,53 @@ ReadEnds scan_ends(const std::string& seq_raw,
     std::string front = seq.substr(0, static_cast<size_t>(w));
     std::string rear = seq.substr(static_cast<size_t>(n - w), static_cast<size_t>(w));
 
-    ends.f_front = match_end(front, f_suffix, f_prefix, f_bc_len, f_dict,
-                             max_anchor_edit, max_prefix_edit, allow_revcomp,
-                             check_prefix, &ends.any_suffix, n_edlib);
-    ends.f_rear = match_end(rear, f_suffix, f_prefix, f_bc_len, f_dict,
-                            max_anchor_edit, max_prefix_edit, allow_revcomp,
-                            check_prefix, &ends.any_suffix, n_edlib);
-    ends.r_front = match_end(front, r_suffix, r_prefix, r_bc_len, r_dict,
-                             max_anchor_edit, max_prefix_edit, allow_revcomp,
-                             check_prefix, &ends.any_suffix, n_edlib);
-    ends.r_rear = match_end(rear, r_suffix, r_prefix, r_bc_len, r_dict,
-                            max_anchor_edit, max_prefix_edit, allow_revcomp,
-                            check_prefix, &ends.any_suffix, n_edlib);
+    ends.f_front = match_end(front, f_suffix, f_bc_len, f_dict,
+                             max_anchor_edit, allow_revcomp,
+                             &ends.any_suffix, n_edlib);
+    ends.f_rear = match_end(rear, f_suffix, f_bc_len, f_dict,
+                            max_anchor_edit, allow_revcomp,
+                            &ends.any_suffix, n_edlib);
+    ends.r_front = match_end(front, r_suffix, r_bc_len, r_dict,
+                             max_anchor_edit, allow_revcomp,
+                             &ends.any_suffix, n_edlib);
+    ends.r_rear = match_end(rear, r_suffix, r_bc_len, r_dict,
+                            max_anchor_edit, allow_revcomp,
+                            &ends.any_suffix, n_edlib);
     return ends;
 }
 
 int orientation_score(const EndHit& f, const EndHit& r) {
     return f.barcode_edit * 1000 + r.barcode_edit * 1000 +
            f.anchor_edit + r.anchor_edit;
+}
+
+int single_end_score(const EndHit& h) {
+    return h.barcode_edit * 1000 + h.anchor_edit;
+}
+
+struct SingleCand {
+    EndHit hit;
+    bool is_f = true;
+    int row = -1;
+    int score = 0;
+};
+
+void consider_single_hit(const EndHit& hit,
+                         bool is_f,
+                         const std::unordered_map<std::string, int>& name_to_row,
+                         const MutantDict& dict,
+                         std::vector<SingleCand>& cands) {
+    if (!hit.ok) return;
+    const std::string& name =
+        dict.parent_names[static_cast<size_t>(hit.parent_id)];
+    auto it = name_to_row.find(name);
+    if (it == name_to_row.end()) return;
+    SingleCand c;
+    c.hit = hit;
+    c.is_f = is_f;
+    c.row = it->second;
+    c.score = single_end_score(hit);
+    cands.push_back(c);
 }
 
 } // namespace
@@ -172,8 +189,6 @@ List demux_reads_cpp(CharacterVector seqs,
                      CharacterVector ids,
                      std::string f_suffix,
                      std::string r_suffix,
-                     std::string f_prefix,
-                     std::string r_prefix,
                      CharacterVector f_barcodes,
                      CharacterVector f_barcode_names,
                      CharacterVector r_barcodes,
@@ -184,11 +199,9 @@ List demux_reads_cpp(CharacterVector seqs,
                      CharacterVector sample_ids,
                      int end_window = 120,
                      int max_anchor_edit = 10,
-                     int max_prefix_edit = 5,
                      int max_barcode_edit = 2,
-                     bool require_prefix = false,
-                     bool check_prefix = false,
                      bool allow_revcomp = true,
+                     bool allow_single_end = false,
                      int n_core = 1) {
     const int n = seqs.size();
     MutantDict f_dict = build_mutant_dict(
@@ -206,9 +219,13 @@ List demux_reads_cpp(CharacterVector seqs,
         static_cast<int>(std::string(r_barcodes[0]).size()) : 0;
 
     std::unordered_map<std::string, int> pair_map;
+    std::unordered_map<std::string, int> f_name_to_row;
+    std::unordered_map<std::string, int> r_name_to_row;
     for (int i = 0; i < pair_ids.size(); ++i) {
         pair_map[std::string(pair_f_names[i]) + "\t" +
                  std::string(pair_r_names[i])] = i;
+        f_name_to_row[std::string(pair_f_names[i])] = i;
+        r_name_to_row[std::string(pair_r_names[i])] = i;
     }
 
     std::vector<std::string> v_seqs = as<std::vector<std::string>>(seqs);
@@ -216,8 +233,8 @@ List demux_reads_cpp(CharacterVector seqs,
     std::vector<int> status(n, 0);
     std::vector<std::string> reason(n, "no_suffix");
     std::vector<std::string> out_pair(n), out_sample(n), out_f(n), out_r(n);
-    std::vector<int> be_f(n, -1), be_r(n, -1), pe_f(n, -1), pe_r(n, -1);
-    std::vector<std::string> match_class(n), anchor_status(n);
+    std::vector<int> be_f(n, -1), be_r(n, -1);
+    std::vector<std::string> match_class(n), assign_mode(n);
     long long n_edlib = 0;
 
     int cores = std::max(1, n_core);
@@ -232,10 +249,10 @@ List demux_reads_cpp(CharacterVector seqs,
         long long local_edlib = 0;
         ReadEnds ends = scan_ends(
             v_seqs[static_cast<size_t>(i)],
-            f_suffix, r_suffix, f_prefix, r_prefix,
+            f_suffix, r_suffix,
             f_bc_len, r_bc_len, f_dict, r_dict,
-            end_window, max_anchor_edit, max_prefix_edit,
-            allow_revcomp, check_prefix || require_prefix, &local_edlib);
+            end_window, max_anchor_edit,
+            allow_revcomp, &local_edlib);
 
         struct Cand {
             bool ok = false;
@@ -250,7 +267,6 @@ List demux_reads_cpp(CharacterVector seqs,
         auto consider = [&](const EndHit& f, const EndHit& r) {
             if (f.ok && r.ok) had_end_pair = true;
             if (!(f.ok && r.ok)) return;
-            if (require_prefix && (f.prefix_edit < 0 || r.prefix_edit < 0)) return;
             const std::string& f_name =
                 f_dict.parent_names[static_cast<size_t>(f.parent_id)];
             const std::string& r_name =
@@ -282,14 +298,65 @@ List demux_reads_cpp(CharacterVector seqs,
         }
 
         if (!best.ok) {
-            if (require_prefix && had_end_pair) {
-                reason[static_cast<size_t>(i)] = "no_prefix";
-            } else if (had_end_pair) {
-                reason[static_cast<size_t>(i)] = "invalid_pair";
-            } else if (!ends.any_suffix) {
-                reason[static_cast<size_t>(i)] = "no_suffix";
-            } else {
-                reason[static_cast<size_t>(i)] = "barcode_fail";
+            bool rescued = false;
+            if (allow_single_end) {
+                std::vector<SingleCand> single_cands;
+                consider_single_hit(ends.f_front, true, f_name_to_row, f_dict, single_cands);
+                consider_single_hit(ends.f_rear, true, f_name_to_row, f_dict, single_cands);
+                consider_single_hit(ends.r_front, false, r_name_to_row, r_dict, single_cands);
+                consider_single_hit(ends.r_rear, false, r_name_to_row, r_dict, single_cands);
+
+                std::unordered_set<int> unique_rows;
+                for (const SingleCand& c : single_cands) unique_rows.insert(c.row);
+
+                if (unique_rows.size() == 1) {
+                    const int row = *unique_rows.begin();
+                    SingleCand best_single;
+                    bool have_best = false;
+                    for (const SingleCand& c : single_cands) {
+                        if (c.row != row) continue;
+                        if (!have_best || c.score < best_single.score ||
+                            (c.score == best_single.score && c.is_f && !best_single.is_f)) {
+                            best_single = c;
+                            have_best = true;
+                        }
+                    }
+
+                    status[static_cast<size_t>(i)] = 1;
+                    reason[static_cast<size_t>(i)] = "";
+                    out_pair[static_cast<size_t>(i)] = std::string(pair_ids[row]);
+                    out_sample[static_cast<size_t>(i)] = std::string(sample_ids[row]);
+                    if (best_single.is_f) {
+                        out_f[static_cast<size_t>(i)] =
+                            f_dict.parent_names[static_cast<size_t>(best_single.hit.parent_id)];
+                        be_f[static_cast<size_t>(i)] = best_single.hit.barcode_edit;
+                        assign_mode[static_cast<size_t>(i)] = "single_f";
+                    } else {
+                        out_r[static_cast<size_t>(i)] =
+                            r_dict.parent_names[static_cast<size_t>(best_single.hit.parent_id)];
+                        be_r[static_cast<size_t>(i)] = best_single.hit.barcode_edit;
+                        assign_mode[static_cast<size_t>(i)] = "single_r";
+                    }
+                    if (best_single.hit.barcode_edit == 0) {
+                        match_class[static_cast<size_t>(i)] = "complete_match";
+                    } else {
+                        match_class[static_cast<size_t>(i)] = "fuzzy_match";
+                    }
+                    rescued = true;
+                } else if (unique_rows.size() > 1) {
+                    reason[static_cast<size_t>(i)] = "ambiguous_ends";
+                    rescued = true;
+                }
+            }
+
+            if (!rescued) {
+                if (had_end_pair) {
+                    reason[static_cast<size_t>(i)] = "invalid_pair";
+                } else if (!ends.any_suffix) {
+                    reason[static_cast<size_t>(i)] = "no_suffix";
+                } else {
+                    reason[static_cast<size_t>(i)] = "barcode_fail";
+                }
             }
             n_edlib += local_edlib;
             continue;
@@ -306,16 +373,12 @@ List demux_reads_cpp(CharacterVector seqs,
             r_dict.parent_names[static_cast<size_t>(best.r.parent_id)];
         be_f[static_cast<size_t>(i)] = best.f.barcode_edit;
         be_r[static_cast<size_t>(i)] = best.r.barcode_edit;
-        pe_f[static_cast<size_t>(i)] = best.f.prefix_edit;
-        pe_r[static_cast<size_t>(i)] = best.r.prefix_edit;
         if (best.f.barcode_edit == 0 && best.r.barcode_edit == 0) {
             match_class[static_cast<size_t>(i)] = "complete_match";
         } else {
             match_class[static_cast<size_t>(i)] = "fuzzy_match";
         }
-        bool both_pref = best.f.prefix_edit >= 0 && best.r.prefix_edit >= 0;
-        anchor_status[static_cast<size_t>(i)] =
-            both_pref ? "high_confidence" : "partial_anchor";
+        assign_mode[static_cast<size_t>(i)] = "dual_end";
         n_edlib += local_edlib;
     }
 
@@ -329,10 +392,8 @@ List demux_reads_cpp(CharacterVector seqs,
         Named("r_index_id") = out_r,
         Named("barcode_edit_f") = be_f,
         Named("barcode_edit_r") = be_r,
-        Named("prefix_edit_f") = pe_f,
-        Named("prefix_edit_r") = pe_r,
         Named("match_class") = match_class,
-        Named("anchor_status") = anchor_status,
+        Named("assign_mode") = assign_mode,
         Named("n_edlib") = static_cast<double>(n_edlib)
     );
 }

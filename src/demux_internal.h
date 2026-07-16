@@ -92,12 +92,6 @@ std::string extract_barcode(const std::string& seq, int suffix_start0, int barco
 
 BarcodeHit lookup_barcode(const std::string& barcode, const MutantDict& dict);
 
-int optional_prefix_edit(const std::string& seq,
-                         const std::string& prefix,
-                         int barcode_start0,
-                         int max_prefix_edit,
-                         long long* n_edlib);
-
 } // namespace miaoseq
 
 #endif

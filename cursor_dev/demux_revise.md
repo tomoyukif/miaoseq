@@ -6,23 +6,40 @@
 - 2026-07-08 — **suffix 中心 + prefix 補助**（truncate 許容 / 曖昧ケースのみ rescue）に変更
 - 2026-07-08 — **出力を assignments 表中心に変更**、`splitDemultiplexReads()` 分離、`basecall.R` 廃止方針を反映
 - 2026-07-08 — **速度: ホットパスは C++（Rcpp+edlib）**。R は API / I/O のみ（§15）
+- 2026-07-14 — **現行実装・[pipeline_revise.md](pipeline_revise.md) §5.1 / §17 に合わせて仕様を同期**（下記「現行方針」）。本文中の prefix / `require_unique_pair` 記述は歴史的経緯として残る箇所があるが、**現行 API は「現行方針」を優先**する
 参照:
 - [cursor_dev/ontbarcoder_demux.md](ontbarcoder_demux.md)
 - [cursor_dev/pipeline_revise.md](pipeline_revise.md)
-対象: `R/demultiplex.R` の `doDemultiplex`（現行 BLAST 実装の置き換え）
+対象: `R/demultiplex.R` の `doDemultiplex`（BLAST 実装は撤去済み）
+
+---
+
+## 0. 現行方針（2026-07-14・実装コードと一致）
+
+詳細方針は [pipeline_revise.md §5.1 / §17](pipeline_revise.md)。本ファイルより新しい決定がある場合はそちらを優先する。
+
+| 項目 | 現行 |
+|------|------|
+| コアルート | **suffix → barcode dict**（C++ `demux_reads_cpp`）。**prefix 検証 API は廃止済み**（`check_prefix` / `require_prefix` / `max_prefix_edit` / `prefix_rescue` は公開 API に無い） |
+| 出力列 | `match_class`, `assign_mode` 等。`anchor_status` / `prefix_edit_*` / `n_high_confidence` は **現行出力に無い** |
+| `require_unique_pair` | **削除済**（旧 R 引数は no-op だった） |
+| 組合せプレート | 利用可。**誤 dual が別の合法ウェルに入りうるリスクは利用者責任**。1:1 または高 Hamming を推奨（README 明記済み） |
+| `allow_single_end` | 組合せ（F/R ID 再利用）では **起動時停止**。1:1 レイアウトのみ許可 |
+| ツール側の topology 救済 | しない（suffix/prefix を締めて誤割当を「完全に」潰すことは本線方針ではない） |
 
 ---
 
 ## 1. 目的
 
-デマルチプレックスを **edlib** ベースの **2段階 + 任意 prefix 検証** に刷新する。
+デマルチプレックスを **edlib** ベースの **suffix + barcode 照合** に刷新する（現行実装）。
 
 ```
 (1) suffix アンカーで位置・方向を特定（緩い閾値）          … 必須・高速ルート
 (2) 近傍から barcode 配列を切り出し、辞書で厳密に照合（厳しい閾値）
-(3) prefix は非必須。見つかれば信頼度を上げ、曖昧ケースのみ rescue
-(4) 主出力は割り当て表。サンプル別 FASTQ は splitDemultiplexReads() で任意生成
+(3) 主出力は割り当て表。サンプル別 FASTQ は splitDemultiplexReads() で任意生成
 ```
+
+> 初期設計にあった「prefix 補助 / rescue」は **現行コードから削除済み**。歴史セクション（§7 旧パラメータ表など）に残る記述は上記「現行方針」で上書きする。
 
 パイプライン上の位置づけ:
 
@@ -182,19 +199,18 @@ LinkingTo:
        (1) 両端 window 抽出
        (2) suffix 検出（必須）
        (3) barcode 切り出し・照合
-       (4) prefix 任意検証（ラベル）
-       (5) 曖昧時のみ prefix_rescue
-       (6) F/R ペアが一意なら割り当て
+       (4) F/R ペアが一意なら割り当て
+       （旧: prefix 検証 / rescue は廃止・§0 参照）
   → Phase C: assignments / summary / unassigned を書き出し
   → Phase D (任意): split_reads=TRUE なら splitDemultiplexReads() を呼ぶ
 ```
 
 ### ONTbarcoder との対応
 
-| ONTbarcoder | miaoseq 改訂版 |
+| ONTbarcoder | miaoseq 改訂版（現行） |
 |-------------|---------------|
 | primer 検出（edlib, ≤10） | **suffix 検出**（≤ `max_anchor_edit`）※必須 |
-| （なし） | **prefix 検証 / rescue**（任意） |
+| （なし） | （旧）prefix 検証 — **廃止** |
 | tag 切り出し | **barcode 切り出し**（suffix 直前 10 bp） |
 | tag 辞書 lookup（≤2） | **barcode 辞書 lookup**（≤ `max_barcode_edit`） |
 | サンプル別 FASTA 出力 | **任意**: `splitDemultiplexReads()` |
@@ -232,36 +248,44 @@ F barcode min dist = 3, R = 4。`max_barcode_edit = 2` では衝突除去必須�
 
 ## 7. Phase B: リードごとの判定
 
-### 7.1 パラメータ
+### 7.1 パラメータ（現行）
 
 | パラメータ | デフォルト | 段階 | 説明 |
 |-----------|-----------|------|------|
 | `end_window` | `120` | 共通 | 両端探索ウィンドウ長（bp） |
 | `max_anchor_edit` | `10` | suffix | 必須アンカー許容編集距離 |
-| `max_prefix_edit` | `5` | prefix | prefix 検証許容編集距離 |
 | `max_barcode_edit` | `2` | barcode | barcode 許容編集距離（dict） |
-| `require_prefix` | `FALSE` | prefix | `TRUE` なら prefix 必須（非推奨） |
-| `require_unique_pair` | `TRUE` | ペア | 有効ペアが一意でなければ未割り当て |
 | `allow_revcomp` | `TRUE` | 共通 | 逆相補も探索 |
+| `allow_single_end` | `FALSE` | barcode | `TRUE` なら F または R 片端のみで assign（**組合せレイアウトでは起動時停止**） |
 | `split_reads` | `FALSE` | 出力 | `TRUE` なら末尾で `splitDemultiplexReads()` を呼ぶ |
 
-### 7.2 通常パス
+廃止・削除予定（現行コードから無くなった／無効）:
+
+| 旧パラメータ | 扱い |
+|-------------|------|
+| `check_prefix` / `require_prefix` / `max_prefix_edit` / `prefix_rescue` | **廃止済み**（公開 API・C++ コアに無し） |
+| `require_unique_pair` | **削除済**（旧 R 引数は no-op） |
+
+### 7.2 通常パス（現行）
 
 1. **suffix 検出（必須）** — 失敗なら unassigned  
-2. **barcode 切り出し** — suffix 直前 10 bp + offset ±0..4 → dict  
+2. **barcode 切り出し** — suffix 直前 barcode 長 + offset ±0..4 → dict  
 3. **向き判定** — F@front+R@rear / F@rear+R@front の合法ペアを比較して割当  
-4. **prefix** — 任意ラベル（`check_prefix`）。必須にするのは `require_prefix` のみ  
+4. **片側 rescue（任意）** — `allow_single_end=TRUE` かつ dual 失敗時、ユニーク row のみ rescue（組合せでは起動時に拒否）
 
 > **注 (2026-07-08):** dict miss 時の NW rescue / Top-K salvage は試したが、  
-> BLAST 合意を落とさずに recall を実質改善できず、**コードから撤去**した。
+> BLAST 合意を落とさずに recall を実質改善できず、**コードから撤去**した。  
+> **注 (2026-07-14):** prefix ラベル／rescue も本線から撤去。組合せ dual の誤割当は **利用者責任**（§0 / pipeline_revise §5.1）。
 
-### 7.3 分類ラベル
+### 7.3 分類ラベル（現行）
 
 | 列 | 値 |
 |----|----|
 | `match_class` | `complete_match` / `fuzzy_match` |
-| `anchor_status` | `high_confidence` / `partial_anchor` |
-| unassigned `reason` | `no_suffix` / `barcode_fail` / `invalid_pair` / `ambiguous_pair` / `no_prefix` |
+| `assign_mode` | `dual_end` / `single_f` / `single_r` |
+| unassigned `reason` | `no_suffix` / `barcode_fail` / `invalid_pair` / `ambiguous_pair` / `ambiguous_ends` |
+
+（旧: `anchor_status` / `prefix_edit_*` / `no_prefix` は現行出力に無い）
 
 ---
 
@@ -289,6 +313,7 @@ demultiplex/
   assignments.tsv              # 必須・主出力
   summary_by_sample.tsv        # 必須
   unassigned.tsv               # 必須
+  stats_unassigned.tsv         # 任意（stats_unassign=TRUE）
   index_layout.tsv             # 診断
   barcode_conflicts.tsv        # 診断
   design_check.tsv             # 診断
@@ -297,7 +322,7 @@ demultiplex/
     unassigned.fq.gz           # オプション
 ```
 
-### 8.3 `assignments.tsv`（主出力）
+### 8.3 `assignments.tsv`（主出力・現行）
 
 ```tsv
 read_id
@@ -309,14 +334,13 @@ source_file
 barcode_edit_f
 barcode_edit_r
 match_class
-anchor_status
-prefix_edit_f
-prefix_edit_r
+assign_mode
 ```
 
 - `sample_id`: `sample_list` があればサンプル名、なければ `index_pair_id`
 - `source_file`: 入力が複数 FASTQ のとき、当該リードの由来ファイル
 - quality / 配列本体は **持たない**（元 FASTQ を参照）
+- 旧列 `anchor_status` / `prefix_edit_f` / `prefix_edit_r` は **現行では出力しない**
 
 ### 8.4 `summary_by_sample.tsv`
 
@@ -326,10 +350,10 @@ index_pair_id
 n_reads
 n_complete
 n_fuzzy
-n_high_confidence
-n_partial_anchor
-n_rescued
+n_single_end
 ```
+
+（旧 `n_high_confidence` / `n_partial_anchor` は prefix 廃止に伴い無い。dual 本数は `n_reads - n_single_end` で概算可）
 
 ### 8.5 `unassigned.tsv`
 
@@ -338,6 +362,20 @@ read_id
 reason
 source_file
 ```
+
+### 8.5.1 `stats_unassigned.tsv`（`stats_unassign = TRUE` のとき）
+
+```tsv
+scope
+sample_id
+reason
+n
+fraction
+```
+
+- `scope`: `overall`（全体）または `source_file` / `sample`（内訳）
+- `reason`: demux では `unassigned$reason`、amplicon では gene 未割当 read の `assign_status`
+- `fraction`: 当該 scope 内での割合
 
 ### 8.6 戻り値
 
@@ -356,7 +394,7 @@ list(
 
 ## 9. API 設計
 
-### 9.1 `doDemultiplex()`
+### 9.1 `doDemultiplex()`（現行シグネチャ概略）
 
 ```r
 doDemultiplex <- function(fastq,
@@ -366,14 +404,13 @@ doDemultiplex <- function(fastq,
                           n_core = 1,
                           end_window = 120,
                           max_anchor_edit = 10,
-                          max_prefix_edit = 5,
                           max_barcode_edit = 2,
-                          require_prefix = FALSE,
-                          prefix_rescue = TRUE,
-                          require_unique_pair = TRUE,
                           allow_revcomp = TRUE,
+                          allow_single_end = FALSE,
                           split_reads = FALSE,
-                          compress = TRUE) {
+                          compress = TRUE,
+                          chunk_size = 20000,
+                          stats_unassign = FALSE) {
   # ... 分類 ...
   # write assignments.tsv / summary / unassigned
 
@@ -382,8 +419,7 @@ doDemultiplex <- function(fastq,
       fastq       = fastq,
       assignments = file.path(demult_dir, "assignments.tsv"),
       out_dir     = file.path(demult_dir, "by_sample"),
-      compress    = compress,
-      n_core      = n_core
+      compress    = compress
     )
   }
 
@@ -396,6 +432,7 @@ doDemultiplex <- function(fastq,
 - **常に割り当て表を書く**
 - `split_reads = TRUE` のときだけ `splitDemultiplexReads()` を内部呼び出し
 - `split_reads = FALSE` で走らせたあと、**後から独立に** `splitDemultiplexReads()` 可能
+- prefix 系引数は **無い**（廃止済み）
 
 ### 9.2 `splitDemultiplexReads()`（新規・export）
 
@@ -436,16 +473,10 @@ R/demultiplex.R（または demultiplex_edlib.R を吸収）
   splitDemultiplexReads()         # export
 
   .parse_index_layout()
-  .build_barcode_dict()
+  .build_barcode_dict()          # 診断用; 本線は C++ 側で再構築
   .validate_barcode_design()
-  .find_suffix_anchor()
-  .extract_barcode()
-  .match_barcode()
-  .check_prefix_optional()
-  .is_ambiguous_hit()
-  .prefix_rescue()
-  .score_read_indices()
-  .demultiplex_chunk()
+  .assert_single_end_allowed()   # 組合せ + allow_single_end で停止
+  .demultiplex_fastq_cpp()       # → demux_reads_cpp
   .write_demultiplex_tables()
   .split_fastq_by_assignment()    # splitDemultiplexReads の実体
 ```
@@ -498,16 +529,16 @@ R/demultiplex.R（または demultiplex_edlib.R を吸収）
 
 ---
 
-## 12. パラメータチューニング指針
+## 12. パラメータチューニング指針（現行）
 
 | パラメータ | デフォルト | 備考 |
 |-----------|-----------|------|
-| `max_anchor_edit` | 10 | ONTbarcoder primer 相当 |
-| `max_prefix_edit` | 5 | rescue / ラベル用 |
-| `max_barcode_edit` | 2 | 衝突除去必須 |
-| `require_prefix` | FALSE | truncate 許容 |
-| `prefix_rescue` | TRUE | 曖昧時のみコスト |
+| `max_anchor_edit` | 10 | 緩いと割当増・組合せでは誤合法ペアも増えうる（利用者責任） |
+| `max_barcode_edit` | 2 | 衝突除去必須。`design_check.tsv` の Hamming 下限と整合を確認 |
+| `allow_single_end` | FALSE | 組合せプレートでは起動時停止 |
 | `split_reads` | FALSE | 必要時のみ I/O |
+
+（旧 `max_prefix_edit` / `require_prefix` / `prefix_rescue` は廃止）
 
 ---
 
@@ -518,7 +549,7 @@ flowchart TD
     U[ユーザー: Dorado basecall] --> FQ[入力 FASTQ]
     FQ --> A[doDemultiplex]
     IDX[index_list.csv] --> A
-    A --> B[suffix → barcode → prefix 補助]
+    A --> B[suffix → barcode → pair]
     B --> C[assignments.tsv]
     B --> D[summary_by_sample.tsv]
     B --> E[unassigned.tsv]
@@ -659,7 +690,7 @@ ONTbarcoder が速いのは「アルゴリズムが短い」ことと、「重�
 1. 向き: F@front+R@rear / F@rear+R@front の両方を評価し有効ペア優先（固定 8 HW/read）
 2. offset: dict-only 切り出しで ±0..4（edlib なし）
 3. NW fallback 廃止 — barcode は dict lookup only
-4. prefix edlib は `check_prefix` / `require_prefix` 時のみ
+4. prefix edlib は **廃止済み**（歴史的には `check_prefix` / `require_prefix` 時のみだった）
 5. `demux_reads_cpp` + vendored `src/edlib.{h,cpp}` + OpenMP
 
 20k: **~1.3 s / 16 core**, assign **52.2%**, BLAST 合意 **96.8%**, edlib/read **8**
@@ -687,7 +718,6 @@ read (C++)
   → edlib ×8: F/R × front/rear × (fwd+RC) で EndHit 収集
   → extract barcode（offsets ±0..4, dict only）
   → 向き候補を sample_map で検証 → best / ambiguous
-  → （任意）check_prefix
 → 結果ベクトルを R に返して assignments.tsv を書く
 ```
 
