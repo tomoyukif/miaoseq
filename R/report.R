@@ -54,15 +54,26 @@ evalMiao <- function(out_dir, output_reads = FALSE) {
 
     n_gene_assigned_reads <- NA_integer_
     n_gene_unassigned_reads <- NA_integer_
+    n_gene_assigned_strict <- NA_integer_
+    n_gene_length_outlier <- NA_integer_
+    n_gene_trim_fail <- NA_integer_
     n_gene_reads_per_gene <- NULL
     prop_gene_reads_per_gene <- NULL
     if (!is.null(gene_assignments) && nrow(gene_assignments) > 0L) {
-        is_assigned <- !is.na(gene_assignments$gene_id) &
-            gene_assignments$gene_id != "" &
-            gene_assignments$gene_id != "NA"
-        n_gene_assigned_reads <- sum(is_assigned)
-        n_gene_unassigned_reads <- sum(!is_assigned)
-        n_gene_reads_per_gene <- table(gene_assignments$gene_id[is_assigned])
+        if (!"assign_status" %in% names(gene_assignments)) {
+            stop("gene_assignments.tsv is missing assign_status.")
+        }
+        st <- as.character(gene_assignments$assign_status)
+        is_ok <- .is_processable_gene_row(
+            gene_assignments$gene_id,
+            st
+        )
+        n_gene_assigned_reads <- sum(is_ok)
+        n_gene_unassigned_reads <- sum(!is_ok)
+        n_gene_assigned_strict <- sum(st == "assigned")
+        n_gene_length_outlier <- sum(st == "length_outlier")
+        n_gene_trim_fail <- sum(st == "trim_fail")
+        n_gene_reads_per_gene <- table(gene_assignments$gene_id[is_ok])
         prop_gene_reads_per_gene <- signif(
             n_gene_reads_per_gene / sum(n_gene_reads_per_gene),
             3
@@ -75,7 +86,20 @@ evalMiao <- function(out_dir, output_reads = FALSE) {
     editcall_fn <- file.path(editcall_dir, "editcall_filtered.csv")
     if (file.exists(editcall_fn)) {
         editcall_out <- utils::read.csv(editcall_fn, stringsAsFactors = FALSE)
-        n_edicall_reads <- sum(editcall_out$count)
+        if (all(c("index_pair_id", "read_id") %in% names(editcall_out))) {
+            n_edicall_reads <- nrow(unique(editcall_out[, c("index_pair_id", "read_id")]))
+        } else if (nrow(editcall_out) > 0L &&
+                   all(c("index_pair_id", "target_gene", "count") %in% names(editcall_out))) {
+            n_edicall_reads <- sum(vapply(
+                split(editcall_out, editcall_out$index_pair_id),
+                function(sub) {
+                    as.integer(max(tapply(sub$count, sub$target_gene, sum)))
+                },
+                integer(1)
+            ))
+        } else {
+            n_edicall_reads <- 0L
+        }
         n_edicall_reads_per_gene <- tapply(
             editcall_out$count,
             editcall_out$target_gene,
@@ -114,9 +138,12 @@ evalMiao <- function(out_dir, output_reads = FALSE) {
     out1 <- rbind(
         c("Input reads: ", n_input_reads, ""),
         c("Demultiplexed reads: ", n_demult_reads, pct(n_demult_reads, n_input_reads)),
-        c("Gene-assigned reads: ", n_gene_assigned_reads, pct(n_gene_assigned_reads, n_input_reads)),
+        c("Gene-assigned reads (processable): ", n_gene_assigned_reads, pct(n_gene_assigned_reads, n_input_reads)),
+        c("  assigned: ", n_gene_assigned_strict, pct(n_gene_assigned_strict, n_input_reads)),
+        c("  length_outlier: ", n_gene_length_outlier, pct(n_gene_length_outlier, n_input_reads)),
+        c("  trim_fail: ", n_gene_trim_fail, pct(n_gene_trim_fail, n_input_reads)),
         c("Amplicon unassigned reads: ", n_gene_unassigned_reads, pct(n_gene_unassigned_reads, n_input_reads)),
-        c("Editcalled reads: ", n_edicall_reads, pct(n_edicall_reads, n_input_reads)),
+        c("Editcalled unique reads: ", n_edicall_reads, pct(n_edicall_reads, n_input_reads)),
         c("Undemultiplexed reads: ", n_undemult, pct(n_undemult, n_input_reads))
     )
     if (length(n_unassign_by_reason) > 0L) {
@@ -202,13 +229,15 @@ evalMiao <- function(out_dir, output_reads = FALSE) {
 #' Visualize edit-calling results per plate as PDF heatmaps
 #'
 #' Reads `editcall/editcall_summary.csv` and draws per-plate genotype heatmaps.
-#' Genotype labels (`ref` / `sub` / `delN` / `insN` / `indelD-I`) are parsed
-#' structurally; SNP (`sub`) is never treated as frameshift. In-frame classes
-#' use **net indel length mod 3** (not CDS phase).
+#' Genotype labels (`ref` / `sub` / `delN` / `insN` / `indelD-I` / `excision`)
+#' are parsed structurally; SNP (`sub`) is never treated as frameshift.
+#' `excision` / `---` is not colored as in-frame. In-frame classes use
+#' **net indel length mod 3** (not CDS phase). Uniq/Dup compares wells that
+#' share `sample_name`.
 #'
 #' @param out_dir Output directory of a completed run. Must contain
 #'   `editcall/editcall_summary.csv`. PDFs are written to `editviewer/`.
-#' @param sample_list Path to a headerless CSV with five columns:
+#' @param sample_list Path to a CSV (header optional) with five columns:
 #'   `index_pair_id`, sample name, plate id, row id (`A`–`H`), column id (`1`–`12`).
 #'   This must be a plate layout file, not `index_list.csv`. When `NULL`, layout
 #'   is taken from `editcall_summary.csv` only if `row_id` / `col_id` already
@@ -300,7 +329,7 @@ editViewer <- function(out_dir, sample_list = NULL, onefile = FALSE, fill_plate 
     eval_levels <- c(
         "ref",
         "alt", "alt_inframe_het", "alt_inframe_homo",
-        "het", "het_inframe"
+        "het", "het_inframe", "excision"
     )
     long_edit_result$edit_eval <- factor(long_edit_result$edit_eval, eval_levels)
     n_gene <- length(unique(long_edit_result$gene))
@@ -371,11 +400,17 @@ editViewer <- function(out_dir, sample_list = NULL, onefile = FALSE, fill_plate 
                 drop = FALSE
             ) +
             ggplot2::scale_fill_manual(
-                values = c("yellow", "darkblue", "blue", "lightblue", "darkgreen", "green"),
+                values = c(
+                    "yellow", "darkblue", "blue", "lightblue",
+                    "darkgreen", "green", "grey40"
+                ),
                 breaks = eval_levels,
                 name = NULL
             ) +
-            ggplot2::labs(title = paste0("Plate ", i)) +
+            ggplot2::labs(
+                title = paste0("Plate ", i),
+                subtitle = "Uniq/Dup compares wells that share sample_name (not index_pair_id)"
+            ) +
             ggplot2::theme(
                 axis.title = ggplot2::element_blank(),
                 axis.text.y = ggplot2::element_blank(),
@@ -424,6 +459,12 @@ editViewer <- function(out_dir, sample_list = NULL, onefile = FALSE, fill_plate 
         return(list(
             type = "ref", n_del = 0L, n_ins = 0L,
             is_ref = TRUE, is_frameshift = FALSE
+        ))
+    }
+    if (identical(label, "excision") || identical(label, "---")) {
+        return(list(
+            type = "excision", n_del = NA_integer_, n_ins = NA_integer_,
+            is_ref = FALSE, is_frameshift = NA
         ))
     }
     if (identical(label, "sub")) {
@@ -481,6 +522,10 @@ editViewer <- function(out_dir, sample_list = NULL, onefile = FALSE, fill_plate 
         return(NA_character_)
     }
     parsed <- lapply(alleles, .parse_allele_label)
+    is_excision <- vapply(parsed, function(p) identical(p$type, "excision"), logical(1))
+    if (any(is_excision)) {
+        return("excision")
+    }
     is_ref <- vapply(parsed, function(p) isTRUE(p$is_ref), logical(1))
     is_fs <- vapply(parsed, function(p) isTRUE(p$is_frameshift), logical(1))
 

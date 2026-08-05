@@ -34,12 +34,12 @@ unless recoverable from \code{amplicon_out}.}
 \item{amplicon_out}{Optional migration fallback: result list from
 \code{\link[=doAssembleAmplicons]{doAssembleAmplicons()}} or path that contains \code{gene_assignments.tsv}.}
 
-\item{pam_list}{Path to a CSV file with PAM / cut-site coordinates (no header).
-Columns: (1) gene ID matching primer / amplicon names, (2) chromosome /
-seqname matching \code{genome_fn} FASTA headers exactly, (3) PAM start (1-based),
-(4) optional strand \code{+} / \code{-} (Cas9 cut offset on genome: \code{+} → pam−3,
-\code{-} → pam+3; missing → cut = pam start),
-(5) optional guide ID (required when a gene has multiple rows).
+\item{pam_list}{Path to a CSV file with PAM / cut-site coordinates
+(header row optional). Columns: (1) gene ID matching primer / amplicon
+names, (2) chromosome / seqname matching \code{genome_fn} FASTA headers exactly,
+(3) PAM start (1-based), (4) optional strand \code{+} / \code{-} (Cas9 cut offset on
+genome: \code{+} → pam−3, \code{-} → pam+3; empty/missing → cut = pam start, with a
+warning), (5) optional guide ID (required when a gene has multiple rows).
 A gene with a single PAM row is labelled \code{target_gene = gene} even if a
 guide ID is present.}
 
@@ -51,11 +51,14 @@ guide ID is present.}
 
 \item{editcall_dir}{Output directory for edit-calling tables.}
 
-\item{sample_list}{Optional CSV mapping \code{index_pair_id} to plate layout (no header).}
+\item{sample_list}{Optional CSV mapping \code{index_pair_id} to plate layout
+(header row optional).}
 
 \item{assignments}{Optional demultiplex \code{assignments.tsv} (path or data.frame)
-used to fill \code{index_pair_id} by \code{read_id}. If \code{NULL}, tries
-\verb{../demultiplex/assignments.tsv} next to \code{editcall_dir}.}
+used to fill \code{index_pair_id} by \code{read_id} and \code{sample_id} labels by
+\code{index_pair_id}. If \code{NULL}, tries \code{../demultiplex/assignments.tsv} next to
+\code{editcall_dir}. \code{sample_id} is a reference label only; aggregation is by
+\code{index_pair_id}.}
 
 \item{check_window}{Window size (bp) around the cut site for initial edit
 extraction (adaptive expansion starts from this window).}
@@ -78,7 +81,7 @@ calling \code{both_cut_excision}. Default 20.}
 
 \item{fastq}{Source FASTQ path(s). Required unless \code{sample_fastq_dir} is set.}
 
-\item{sample_fastq_dir}{Optional \verb{by_sample/*.fq.gz} directory.}
+\item{sample_fastq_dir}{Optional \verb{by_sample/\{index_pair_id\}.fq.gz} directory.}
 
 \item{max_primer_edit}{Maximum edlib edit distance when locating primers to
 strip outer adapters. Primer sequences themselves are retained in the
@@ -88,7 +91,9 @@ aligned amplicon span.}
 editcall (edlib alignment + window / joint extraction).}
 }
 \value{
-A data frame (\code{editcall_summary.csv} structure). Also writes \code{run_stats.txt} with versions and window / Plan A′ parameters.
+A data frame (\code{editcall_summary.csv} structure). Allele tables include
+\code{cut_amplicon} (formerly \code{cut_insert}). Also writes \code{run_stats.txt} with
+versions and window / Plan A′ parameters.
 }
 \description{
 Consumes \code{\link[=doAssignGenes]{doAssignGenes()}} output (\code{gene_assign}) and per-read FASTQ

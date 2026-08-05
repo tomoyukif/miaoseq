@@ -37,34 +37,6 @@ assign_genes_primers_cpp <- function(seqs, gene_ids, f_primers, r_primers, end_w
     .Call(`_miaoseq_assign_genes_primers_cpp`, seqs, gene_ids, f_primers, r_primers, end_window, max_primer_edit, n_core)
 }
 
-#' Majority consensus for a set of sequences (C++)
-#' @keywords internal
-#' @noRd
-consensus_sequences_cpp <- function(seqs, max_edit = 8L) {
-    .Call(`_miaoseq_consensus_sequences_cpp`, seqs, max_edit)
-}
-
-#' Quality-weighted consensus (Phred) for a set of sequences (C++)
-#' @keywords internal
-#' @noRd
-consensus_sequences_quality_cpp <- function(seqs, quals, max_edit = 8L) {
-    .Call(`_miaoseq_consensus_sequences_quality_cpp`, seqs, quals, max_edit)
-}
-
-#' Assign genes by amplicon reference edit distance (C++)
-#' @keywords internal
-#' @noRd
-assign_genes_amplicon_ref_cpp <- function(seqs, ref_ids, ref_seqs, max_edit = 12L, n_core = 1L) {
-    .Call(`_miaoseq_assign_genes_amplicon_ref_cpp`, seqs, ref_ids, ref_seqs, max_edit, n_core)
-}
-
-#' Greedy cluster + consensus for one gene bucket (C++)
-#' @keywords internal
-#' @noRd
-cluster_consensus_gene_cpp <- function(seqs, sample_id, gene_id, method = "both", min_cluster_reads = 5L, max_clusters = 20L, max_edit = 12L, quals = NULL, consensus_backend = "majority") {
-    .Call(`_miaoseq_cluster_consensus_gene_cpp`, seqs, sample_id, gene_id, method, min_cluster_reads, max_clusters, max_edit, quals, consensus_backend)
-}
-
 #' Bucket FASTQ reads by demultiplex assignments (C++)
 #'
 #' Streams one or more FASTQ files with a buffered reader and returns
@@ -111,11 +83,11 @@ demux_reads_cpp <- function(seqs, ids, f_suffix, r_suffix, f_barcodes, f_barcode
     .Call(`_miaoseq_demux_reads_cpp`, seqs, ids, f_suffix, r_suffix, f_barcodes, f_barcode_names, r_barcodes, r_barcode_names, pair_f_names, pair_r_names, pair_ids, sample_ids, end_window, max_anchor_edit, max_barcode_edit, allow_revcomp, allow_single_end, n_core)
 }
 
-#' Stream-demultiplex FASTQ files; write TSV (+ optional per-sample FASTQ)
+#' Stream-demultiplex FASTQ files; write TSV (+ optional per-index-pair FASTQ)
 #'
 #' Reads FASTQ in chunks, demultiplexes with OpenMP, and streams
 #' `assignments.tsv` / `unassigned.tsv`. When `split_reads` is TRUE, also
-#' writes per-sample FASTQ in the same pass.
+#' writes one FASTQ per `index_pair_id` in the same pass.
 #'
 #' @keywords internal
 #' @noRd
@@ -154,7 +126,7 @@ extract_adaptive_edit_window_cpp <- function(ref_aln, query_aln, start, end, anc
 #' Per-read editcall extraction (trim assumed done): align + windows + joint.
 #' @keywords internal
 #' @noRd
-editcall_process_reads_cpp <- function(sample_id, index_pair_id, read_id, gene_id, seqs, pam_gene, pam_target_gene, pam_guide_id, pam_cut_insert, pam_win_start, pam_win_end, ref_gene_id, ref_seq, check_window = 10L, anchor_bp = 5L, max_expand = 50L, min_span_bp = 30L, excision_tol_bp = 20L, n_core = 1L) {
-    .Call(`_miaoseq_editcall_process_reads_cpp`, sample_id, index_pair_id, read_id, gene_id, seqs, pam_gene, pam_target_gene, pam_guide_id, pam_cut_insert, pam_win_start, pam_win_end, ref_gene_id, ref_seq, check_window, anchor_bp, max_expand, min_span_bp, excision_tol_bp, n_core)
+editcall_process_reads_cpp <- function(sample_id, index_pair_id, read_id, gene_id, seqs, pam_gene, pam_target_gene, pam_guide_id, pam_cut_amplicon, pam_win_start, pam_win_end, ref_gene_id, ref_seq, check_window = 10L, anchor_bp = 5L, max_expand = 50L, min_span_bp = 30L, excision_tol_bp = 20L, n_core = 1L) {
+    .Call(`_miaoseq_editcall_process_reads_cpp`, sample_id, index_pair_id, read_id, gene_id, seqs, pam_gene, pam_target_gene, pam_guide_id, pam_cut_amplicon, pam_win_start, pam_win_end, ref_gene_id, ref_seq, check_window, anchor_bp, max_expand, min_span_bp, excision_tol_bp, n_core)
 }
 

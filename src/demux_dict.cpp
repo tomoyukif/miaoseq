@@ -62,14 +62,18 @@ MutantDict build_mutant_dict(const std::vector<std::string>& barcodes,
         const std::string& parent = barcodes[static_cast<size_t>(i)];
         add_owner(parent, i, 0);
         if (max_edit < 1) continue;
-        std::vector<std::string> level1 = mutate_barcode_once(parent);
-        for (const auto& m : level1) add_owner(m, i, 1);
-        if (max_edit >= 2) {
-            for (const auto& m1 : level1) {
-                for (const auto& m2 : mutate_barcode_once(m1)) {
-                    if (m2 != parent) add_owner(m2, i, 2);
+        std::vector<std::string> prev = {parent};
+        for (int ed = 1; ed <= max_edit; ++ed) {
+            std::unordered_set<std::string> next;
+            for (const auto& seq : prev) {
+                for (const auto& m : mutate_barcode_once(seq)) {
+                    if (m == parent) continue;
+                    add_owner(m, i, ed);
+                    next.insert(m);
                 }
             }
+            prev.assign(next.begin(), next.end());
+            if (prev.empty()) break;
         }
     }
 

@@ -18,9 +18,10 @@ splitDemultiplexReads(
 \item{fastq}{Character vector of source FASTQ paths.}
 
 \item{assignments}{\code{assignments.tsv} path or a data.frame with
-\code{read_id} and \code{sample_id} columns.}
+\code{read_id} and \code{index_pair_id} (legacy: \code{sample_id} is copied to
+\code{index_pair_id} when the pair column is missing).}
 
-\item{out_dir}{Output directory for per-sample FASTQ files.}
+\item{out_dir}{Output directory for per-\code{index_pair_id} FASTQ files.}
 
 \item{compress}{If \code{TRUE}, write \code{.fq.gz}.}
 
@@ -33,10 +34,10 @@ splitDemultiplexReads(
 \item{n_core}{Unused (reserved).}
 }
 \value{
-Invisibly, a named integer vector of reads written per sample.
+Invisibly, a named integer vector of reads written per \code{index_pair_id}.
 }
 \description{
-Writes one FASTQ per \code{sample_id} using \code{assignments} from \code{\link[=doDemultiplex]{doDemultiplex()}}.
-Can be run after \code{doDemultiplex(..., split_reads = FALSE)}. Uses a C++
-streaming reader/writer (not line-by-line R I/O).
+Writes one FASTQ per \code{index_pair_id} using \code{assignments} from
+\code{\link[=doDemultiplex]{doDemultiplex()}}. Can be run after \code{doDemultiplex(..., split_reads = FALSE)}.
+Uses a C++ streaming reader/writer (not line-by-line R I/O).
 }

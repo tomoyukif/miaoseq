@@ -7,7 +7,7 @@
 doAssembleAmplicons(
   gene_assign,
   out_dir,
-  primer_list = NULL,
+  primer_list,
   method = c("both", "cluster", "consensus"),
   min_reads = 5L,
   min_cluster_reads = 5L,
@@ -17,7 +17,7 @@ doAssembleAmplicons(
   cluster_backend = "vsearch",
   assembly_backend = c("cluster", "overlap_graph"),
   overlap_min_identity = 0.90,
-  strict_end_trim = FALSE,
+  strict_end_trim = TRUE,
   min_cluster_purity = NULL,
   overwrite = FALSE,
   n_core = 1L
@@ -27,8 +27,8 @@ doAmpliconResolve(gene_assign, out_dir, ...)
 }
 \description{
 Consumes GeneAssignResult (from \code{doAssignGenes}) or \code{gene_assignments.tsv}
-and performs per sample x gene clustering (\code{vsearch}) and consensus
-reconstruction (\code{abpoa}). Clusters whose exact-insert modal purity is below
+and performs per \code{index_pair_id} x gene clustering (\code{vsearch}) and consensus
+reconstruction (\code{abpoa}). \code{primer_list} is required. Clusters whose exact-insert modal purity is below
 \code{min_cluster_purity} are discarded (\code{NULL} disables the filter).
 \code{doAmpliconResolve} is an alias of this assembly-only function.
 }
@@ -43,6 +43,9 @@ below this size are excluded.}
 
 \item{cluster_backend}{Fixed to \code{"vsearch"} (Phase K).}
 
+\item{strict_end_trim}{If \code{TRUE} (default), cluster only successfully
+trimmed inserts; trim failures go to U1.}
+
 \item{min_cluster_purity}{Minimum fraction of cluster members that share the
 most common exact insert sequence. Default \code{NULL} (disabled). Set to
 e.g. \code{0.8} for strict filtering.}
@@ -51,8 +54,8 @@ e.g. \code{0.8} for strict filtering.}
 \code{clusters.fasta} contains member reads with headers
 \code{>{read_id} {cluster_id}} (space-separated). \code{consensus.fasta}
 contains abPOA consensus sequences. In \code{cluster_counts.tsv},
-\code{fraction_bucket} is the fraction within the sample x gene bucket
-(formerly \code{fraction_sample}).
+\code{fraction_bucket} is the fraction within the \code{index_pair_id} x gene
+bucket after primer trim (cluster input; formerly \code{fraction_sample}).
 }
 \value{A list with \code{samples}, \code{out_dir}, assembled \code{table}, and \code{gene_assignments}.
 \code{cluster_counts.tsv} includes a \code{cluster_purity} column when purity was computed.}

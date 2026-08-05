@@ -10,7 +10,7 @@ editViewer(out_dir, sample_list = NULL, onefile = FALSE, fill_plate = TRUE)
 \item{out_dir}{Output directory of a completed run. Must contain
 \code{editcall/editcall_summary.csv}. PDFs are written to \verb{editviewer/}.}
 
-\item{sample_list}{Path to a headerless CSV with five columns:
+\item{sample_list}{Path to a CSV (header optional) with five columns:
 \code{index_pair_id}, sample name, plate id, row id (\code{A}–\code{H}), column id (\code{1}–\code{12}).
 This must be a plate layout file, not \code{index_list.csv}. When \code{NULL}, layout
 is taken from \code{editcall_summary.csv} only if \code{row_id} / \code{col_id} already
@@ -25,7 +25,9 @@ Invisibly, a character vector of generated PDF file paths.
 }
 \description{
 Reads \code{editcall/editcall_summary.csv} and draws per-plate genotype heatmaps.
-Genotype labels (\code{ref} / \code{sub} / \code{delN} / \code{insN} / \code{indelD-I}) are parsed
-structurally; SNP (\code{sub}) is never treated as frameshift. In-frame classes
-use \strong{net indel length mod 3} (not CDS phase).
+Genotype labels (\code{ref} / \code{sub} / \code{delN} / \code{insN} / \code{indelD-I} / \code{excision})
+are parsed structurally; SNP (\code{sub}) is never treated as frameshift.
+\code{excision} / \verb{---} is not colored as in-frame. In-frame classes use
+\strong{net indel length mod 3} (not CDS phase). Uniq/Dup compares wells that
+share \code{sample_name}.
 }

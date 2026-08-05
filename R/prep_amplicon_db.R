@@ -11,7 +11,9 @@
 #'
 #' When deriving intervals from the genome, the run **stops** if any gene has
 #' more than one F/R locus pair, or if any interval length exceeds
-#' `2 * expected_length`.
+#' `2 * expected_length`. Extracted sequences are oriented so the forward
+#' primer is at the 5' end (reverse-complemented when the locus is on the
+#' minus strand). `amplicon.fa` is primer-inclusive F→R.
 #'
 #' @param primer_list Path to a CSV with primer ID and sequence columns.
 #'   Forward primer IDs must end with \code{_F}, reverse with \code{_R}.
@@ -68,6 +70,19 @@ prepAmpliconDB <- function(primer_list,
     }
     amplicon_seq <- readDNAStringSet(amplicon_fasta)
     .validate_user_amplicon_fasta(amplicon_seq, gene_ids, expected_length)
+    primers_df <- .read_list_csv(
+      primer_list,
+      min_cols = 2L,
+      header_tokens = c("primer_id", "primer", "id", "sequence", "seq", "gene")
+    )
+    f_idx <- grep("_F$", primers_df$V1)
+    r_idx <- grep("_R$", primers_df$V1)
+    f_primers <- DNAStringSet(primers_df$V2[f_idx])
+    names(f_primers) <- primers_df$V1[f_idx]
+    r_primers <- DNAStringSet(primers_df$V2[r_idx])
+    names(r_primers) <- primers_df$V1[r_idx]
+    amplicon_seq <- .orient_amplicons_f_to_r(amplicon_seq, f_primers, r_primers)
+    .check_amplicon_starts_with_primer(amplicon_seq, f_primers)
     writeXStringSet(amplicon_seq, amplicon_fn)
     if (!is.null(genome_fn)) {
       if (!file.exists(genome_fn)) {
@@ -93,7 +108,11 @@ prepAmpliconDB <- function(primer_list,
   expected_length <- as.integer(expected_length)
   max_span <- 2L * expected_length
 
-  primers <- read.csv(primer_list, header = FALSE, stringsAsFactors = FALSE)
+  primers <- .read_list_csv(
+    primer_list,
+    min_cols = 2L,
+    header_tokens = c("primer_id", "primer", "id", "sequence", "seq", "gene")
+  )
   f_idx <- grep("_F$", primers$V1)
   r_idx <- grep("_R$", primers$V1)
   if (length(f_idx) < 1L || length(r_idx) < 1L) {
@@ -180,6 +199,8 @@ prepAmpliconDB <- function(primer_list,
 
   amplicon_seq <- genome[amplicon_gr]
   names(amplicon_seq) <- amplicon_gr$id
+  amplicon_seq <- .orient_amplicons_f_to_r(amplicon_seq, f_primers, r_primers)
+  .check_amplicon_starts_with_primer(amplicon_seq, f_primers)
 
   write.csv(
     amplicon_df[, c("qseqid", "sseqid", "sstart.x", "send.x", "sstart.y", "send.y", "start", "end", "span")],
@@ -192,7 +213,11 @@ prepAmpliconDB <- function(primer_list,
 
 #' @keywords internal
 .primer_gene_ids <- function(primer_list) {
-  primers <- read.csv(primer_list, header = FALSE, stringsAsFactors = FALSE)
+  primers <- .read_list_csv(
+    primer_list,
+    min_cols = 2L,
+    header_tokens = c("primer_id", "primer", "id", "sequence", "seq", "gene")
+  )
   f_ids <- primers$V1[grep("_F$", primers$V1)]
   r_ids <- primers$V1[grep("_R$", primers$V1)]
   if (length(f_ids) < 1L || length(r_ids) < 1L) {
@@ -315,4 +340,65 @@ prepAmpliconDB <- function(primer_list,
     return(NULL)
   }
   do.call(rbind, rows)
+}
+
+#' Orient each amplicon so the F primer sequence is at the 5' end.
+#' @keywords internal
+.orient_amplicons_f_to_r <- function(amplicon_seq, f_primers, r_primers) {
+  f_by_gene <- setNames(
+    as.character(f_primers),
+    sub("_F$", "", names(f_primers))
+  )
+  r_by_gene <- setNames(
+    as.character(r_primers),
+    sub("_R$", "", names(r_primers))
+  )
+  for (i in seq_along(amplicon_seq)) {
+    gid <- names(amplicon_seq)[[i]]
+    seq_plus <- toupper(as.character(amplicon_seq[[i]]))
+    seq_rc <- toupper(as.character(reverseComplement(amplicon_seq[[i]])))
+    fp <- toupper(f_by_gene[[gid]])
+    rp <- toupper(r_by_gene[[gid]])
+    rp_rc <- if (!is.null(rp) && !is.na(rp)) {
+      as.character(reverseComplement(DNAString(rp)))
+    } else {
+      ""
+    }
+    plus_ok <- !is.null(fp) && !is.na(fp) && startsWith(seq_plus, fp)
+    rc_ok <- !is.null(fp) && !is.na(fp) && startsWith(seq_rc, fp)
+    if (rc_ok && !plus_ok) {
+      amplicon_seq[[i]] <- reverseComplement(amplicon_seq[[i]])
+    } else if (!plus_ok && !rc_ok && nzchar(rp_rc)) {
+      if (startsWith(seq_rc, fp %||% "") || endsWith(seq_plus, rp_rc)) {
+        amplicon_seq[[i]] <- reverseComplement(amplicon_seq[[i]])
+      }
+    }
+  }
+  amplicon_seq
+}
+
+#' @keywords internal
+.check_amplicon_starts_with_primer <- function(amplicon_seq, f_primers) {
+  f_by_gene <- setNames(
+    toupper(as.character(f_primers)),
+    sub("_F$", "", names(f_primers))
+  )
+  bad <- character()
+  for (i in seq_along(amplicon_seq)) {
+    gid <- names(amplicon_seq)[[i]]
+    fp <- f_by_gene[[gid]]
+    if (is.null(fp) || is.na(fp) || !nzchar(fp)) next
+    seqs <- toupper(as.character(amplicon_seq[[i]]))
+    if (!startsWith(seqs, fp)) {
+      bad <- c(bad, gid)
+    }
+  }
+  if (length(bad) > 0L) {
+    stop(
+      "amplicon sequence(s) do not start with the forward primer (F->R contract): ",
+      paste(bad, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
 }

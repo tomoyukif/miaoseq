@@ -71,11 +71,11 @@ void write_unassigned_line(TsvWriter& w,
 
 } // namespace
 
-//' Stream-demultiplex FASTQ files; write TSV (+ optional per-sample FASTQ)
+//' Stream-demultiplex FASTQ files; write TSV (+ optional per-index-pair FASTQ)
 //'
 //' Reads FASTQ in chunks, demultiplexes with OpenMP, and streams
 //' `assignments.tsv` / `unassigned.tsv`. When `split_reads` is TRUE, also
-//' writes per-sample FASTQ in the same pass.
+//' writes one FASTQ per `index_pair_id` in the same pass.
 //'
 //' @keywords internal
 //' @noRd
@@ -125,11 +125,12 @@ List demux_fastq_stream_cpp(CharacterVector fastq_files,
         allow_revcomp, allow_single_end);
 
     std::vector<std::string> v_sample_ids = as<std::vector<std::string>>(sample_ids);
-    std::unordered_map<std::string, int> sample_to_idx;
-    sample_to_idx.reserve(static_cast<size_t>(n_pairs) * 2);
+    std::vector<std::string> v_pair_ids = as<std::vector<std::string>>(pair_ids);
+    std::unordered_map<std::string, int> pair_to_idx;
+    pair_to_idx.reserve(static_cast<size_t>(n_pairs) * 2);
     std::vector<SampleStats> stats(static_cast<size_t>(n_pairs));
     for (int i = 0; i < n_pairs; ++i) {
-        sample_to_idx.emplace(v_sample_ids[static_cast<size_t>(i)], i);
+        pair_to_idx.emplace(v_pair_ids[static_cast<size_t>(i)], i);
     }
 
     const std::string assign_path = demult_dir + "/assignments.tsv";
@@ -165,6 +166,7 @@ List demux_fastq_stream_cpp(CharacterVector fastq_files,
     long long n_records = 0;
     long long n_assigned = 0;
     long long n_unassigned = 0;
+    long long n_incomplete = 0;
 
     for (int fi = 0; fi < fastq_files.size(); ++fi) {
         const std::string fq = as<std::string>(fastq_files[fi]);
@@ -194,8 +196,8 @@ List demux_fastq_stream_cpp(CharacterVector fastq_files,
                 if (hit.status == 1) {
                     ++n_assigned;
                     write_assignment_line(assign_w, rec.id, hit, fq);
-                    auto sit = sample_to_idx.find(hit.sample_id);
-                    if (sit != sample_to_idx.end()) {
+                    auto sit = pair_to_idx.find(hit.index_pair_id);
+                    if (sit != pair_to_idx.end()) {
                         SampleStats& st = stats[static_cast<size_t>(sit->second)];
                         ++st.n_reads;
                         if (hit.match_class == "complete_match") ++st.n_complete;
@@ -209,7 +211,7 @@ List demux_fastq_stream_cpp(CharacterVector fastq_files,
                             if (!sample_opened[si]) {
                                 const std::string path =
                                     by_sample_dir + "/" +
-                                    safe_filename(v_sample_ids[si]) + fq_ext;
+                                    safe_filename(v_pair_ids[si]) + fq_ext;
                                 sample_writers[si].open(path, compress);
                                 sample_opened[si] = 1;
                             }
@@ -237,7 +239,10 @@ List demux_fastq_stream_cpp(CharacterVector fastq_files,
 
         std::string h, s, p, q;
         while (reader.getline(h)) {
-            if (!reader.getline(s) || !reader.getline(p) || !reader.getline(q)) break;
+            if (!reader.getline(s) || !reader.getline(p) || !reader.getline(q)) {
+                ++n_incomplete;
+                break;
+            }
             FastqRec rec;
             rec.header = h;
             rec.seq = s;
@@ -268,7 +273,7 @@ List demux_fastq_stream_cpp(CharacterVector fastq_files,
     IntegerVector summary_single(n_pairs);
     for (int i = 0; i < n_pairs; ++i) {
         summary_sample[i] = v_sample_ids[static_cast<size_t>(i)];
-        summary_pair[i] = as<std::string>(pair_ids[i]);
+        summary_pair[i] = v_pair_ids[static_cast<size_t>(i)];
         summary_n[i] = static_cast<int>(stats[static_cast<size_t>(i)].n_reads);
         summary_complete[i] =
             static_cast<int>(stats[static_cast<size_t>(i)].n_complete);
@@ -292,6 +297,7 @@ List demux_fastq_stream_cpp(CharacterVector fastq_files,
         Named("n_records") = n_records,
         Named("n_assigned") = n_assigned,
         Named("n_unassigned") = n_unassigned,
+        Named("n_incomplete") = n_incomplete,
         Named("n_edlib") = static_cast<double>(n_edlib),
         Named("assignments_tsv") = assign_path,
         Named("unassigned_tsv") = unassign_path,
@@ -317,34 +323,54 @@ List split_fastq_by_assignment_cpp(CharacterVector fastq_files,
                                    bool include_unassigned = false,
                                    std::string unassigned_tsv = "") {
     std::unordered_map<std::string, std::string> id2sample;
+    bool keyed_with_source = false;
     {
         LineReader ar(assignments_tsv);
         std::string line;
         bool first = true;
+        int source_col = -1;
         while (ar.getline(line)) {
             if (first) {
                 first = false;
-                if (line.find("read_id") != std::string::npos) continue;
+                if (line.find("read_id") != std::string::npos) {
+                    std::vector<std::string> cols;
+                    size_t a = 0;
+                    while (true) {
+                        size_t b = line.find('\t', a);
+                        cols.push_back(b == std::string::npos ? line.substr(a)
+                                                             : line.substr(a, b - a));
+                        if (b == std::string::npos) break;
+                        a = b + 1;
+                    }
+                    for (int ci = 0; ci < static_cast<int>(cols.size()); ++ci) {
+                        if (cols[static_cast<size_t>(ci)] == "source_file") {
+                            source_col = ci;
+                            keyed_with_source = true;
+                            break;
+                        }
+                    }
+                    continue;
+                }
             }
             if (line.empty()) continue;
-            // read_id \t index_pair_id \t f \t r \t sample_id \t ...
-            size_t p0 = 0;
-            size_t p1 = line.find('\t', p0);
-            if (p1 == std::string::npos) continue;
-            const std::string rid = line.substr(p0, p1 - p0);
-            // skip 3 fields to sample_id (cols 2,3,4) then col5
-            size_t pos = p1 + 1;
-            for (int k = 0; k < 3; ++k) {
-                pos = line.find('\t', pos);
-                if (pos == std::string::npos) break;
-                ++pos;
+            std::vector<std::string> cols;
+            size_t a = 0;
+            while (true) {
+                size_t b = line.find('\t', a);
+                cols.push_back(b == std::string::npos ? line.substr(a)
+                                                     : line.substr(a, b - a));
+                if (b == std::string::npos) break;
+                a = b + 1;
             }
-            if (pos == std::string::npos || pos == 0) continue;
-            size_t p5 = line.find('\t', pos);
-            const std::string sid = (p5 == std::string::npos)
-                ? line.substr(pos)
-                : line.substr(pos, p5 - pos);
-            if (!rid.empty() && !sid.empty()) id2sample[rid] = sid;
+            if (cols.size() < 2 || cols[0].empty() || cols[1].empty()) continue;
+            if (keyed_with_source && source_col >= 0 &&
+                source_col < static_cast<int>(cols.size()) &&
+                !cols[static_cast<size_t>(source_col)].empty()) {
+                id2sample[cols[0] + "\t" + cols[static_cast<size_t>(source_col)]] =
+                    cols[1];
+            } else {
+                id2sample[cols[0]] = cols[1];
+            }
         }
     }
 
@@ -395,14 +421,23 @@ List split_fastq_by_assignment_cpp(CharacterVector fastq_files,
 
     long long n_records = 0;
     long long n_written = 0;
+    long long n_incomplete = 0;
     for (int fi = 0; fi < fastq_files.size(); ++fi) {
-        LineReader reader(as<std::string>(fastq_files[fi]));
+        const std::string fq = as<std::string>(fastq_files[fi]);
+        LineReader reader(fq);
         std::string h, s, p, q;
         while (reader.getline(h)) {
-            if (!reader.getline(s) || !reader.getline(p) || !reader.getline(q)) break;
+            if (!reader.getline(s) || !reader.getline(p) || !reader.getline(q)) {
+                ++n_incomplete;
+                break;
+            }
             ++n_records;
             const std::string rid = parse_fastq_id(h);
-            auto it = id2sample.find(rid);
+            auto it = keyed_with_source ? id2sample.find(rid + "\t" + fq)
+                                        : id2sample.find(rid);
+            if (it == id2sample.end() && keyed_with_source) {
+                it = id2sample.find(rid);
+            }
             if (it != id2sample.end()) {
                 auto sit = sample_idx.find(it->second);
                 if (sit != sample_idx.end()) {
@@ -429,10 +464,11 @@ List split_fastq_by_assignment_cpp(CharacterVector fastq_files,
     }
 
     return List::create(
-        Named("sample_id") = out_samples,
+        Named("index_pair_id") = out_samples,
         Named("n_reads") = out_counts,
         Named("n_records") = n_records,
         Named("n_written") = n_written,
-        Named("n_unassigned_written") = n_un
+        Named("n_unassigned_written") = n_un,
+        Named("n_incomplete") = n_incomplete
     );
 }

@@ -115,12 +115,12 @@ doReassessAssemblies <- function(
   }
   primers <- if (!is.null(primer_list)) .parse_primer_pairs(primer_list) else NULL
 
-  sample_dirs <- list.dirs(amp_dir, recursive = FALSE, full.names = TRUE)
-  sample_dirs <- sample_dirs[
-    file.exists(file.path(sample_dirs, "cluster_counts.tsv")) |
-      file.exists(file.path(sample_dirs, "consensus.fasta"))
+  pair_dirs <- list.dirs(amp_dir, recursive = FALSE, full.names = TRUE)
+  pair_dirs <- pair_dirs[
+    file.exists(file.path(pair_dirs, "cluster_counts.tsv")) |
+      file.exists(file.path(pair_dirs, "consensus.fasta"))
   ]
-  if (length(sample_dirs) < 1L) {
+  if (length(pair_dirs) < 1L) {
     stop("No per-sample assemble outputs found under: ", amp_dir)
   }
 
@@ -128,12 +128,12 @@ doReassessAssemblies <- function(
   for (b in backends_run) {
     b_root <- file.path(out_dir, b)
     dir.create(b_root, recursive = TRUE, showWarnings = FALSE)
-    for (sdir in sample_dirs) {
-      sid <- basename(sdir)
+    for (pair_dir_path in pair_dirs) {
+      pair_id <- basename(pair_dir_path)
       summary_rows[[length(summary_rows) + 1L]] <- .reassess_one_sample(
-        sample_id = sid,
-        amplicon_sample_dir = sdir,
-        out_sample_dir = file.path(b_root, sid),
+        index_pair_id = pair_id,
+        amplicon_pair_dir = pair_dir_path,
+        out_pair_dir = file.path(b_root, pair_id),
         gene_assign = ga,
         primers = primers,
         max_primer_edit = as.integer(max_primer_edit),
@@ -166,14 +166,20 @@ doReassessAssemblies <- function(
   )
 
   versions <- .tool_versions(backends_run)
+  pkg_ver <- tryCatch(
+    as.character(utils::packageVersion("miaoseq")),
+    error = function(e) NA_character_
+  )
   write(
     paste0(
+      "r_version=", R.version.string, "\n",
+      "miaoseq_version=", pkg_ver, "\n",
       "backends_requested=", paste(backend, collapse = ","), "\n",
       "backends_run=", paste(backends_run, collapse = ","), "\n",
       "consensus_merge_max_edit=", consensus_merge_max_edit, "\n",
       "read_assign_max_edit=", read_assign_max_edit, "\n",
       "min_identity=", if (is.null(min_identity)) "auto" else min_identity, "\n",
-      "n_samples=", length(sample_dirs), "\n",
+      "n_samples=", length(pair_dirs), "\n",
       paste(paste0("version_", names(versions), "=", versions), collapse = "\n"),
       "\n"
     ),
@@ -181,7 +187,7 @@ doReassessAssemblies <- function(
   )
 
   list(
-    samples = unique(summary_df$sample_id),
+    samples = unique(summary_df$index_pair_id),
     out_dir = out_dir,
     summary = summary_df,
     summary_compare = compare_df,
@@ -215,32 +221,32 @@ doReassessAssemblies <- function(
 .reassess_summary_compare <- function(summary_df) {
   if (nrow(summary_df) < 1L) {
     return(data.frame(
-      sample_id = character(),
+      index_pair_id = character(),
       stringsAsFactors = FALSE
     ))
   }
   backends <- unique(summary_df$backend)
-  base <- unique(summary_df[, c("sample_id", "n_consensus", "n_unassigned_U1"), drop = FALSE])
+  base <- unique(summary_df[, c("index_pair_id", "n_consensus", "n_unassigned_U1"), drop = FALSE])
   out <- base
   for (b in backends) {
     sub <- summary_df[summary_df$backend == b, , drop = FALSE]
     tmp <- data.frame(
-      sample_id = sub$sample_id,
+      index_pair_id = sub$index_pair_id,
       stringsAsFactors = FALSE
     )
     tmp[[paste0(b, "_n_near_duplicate_groups")]] <- sub$n_near_duplicate_groups
     tmp[[paste0(b, "_reassignable_frac")]] <- sub$reassignable_frac
     tmp[[paste0(b, "_n_reassignable_U1")]] <- sub$n_reassignable_U1
     tmp[[paste0(b, "_min_identity")]] <- sub$min_identity
-    out <- merge(out, tmp, by = "sample_id", all.x = TRUE)
+    out <- merge(out, tmp, by = "index_pair_id", all.x = TRUE)
   }
-  out[order(out$sample_id), , drop = FALSE]
+  out[order(out$index_pair_id), , drop = FALSE]
 }
 
 #' @keywords internal
-.reassess_one_sample <- function(sample_id,
-                                 amplicon_sample_dir,
-                                 out_sample_dir,
+.reassess_one_sample <- function(index_pair_id,
+                                 amplicon_pair_dir,
+                                 out_pair_dir,
                                  gene_assign,
                                  primers,
                                  max_primer_edit,
@@ -249,9 +255,9 @@ doReassessAssemblies <- function(
                                  min_identity,
                                  backend,
                                  n_core) {
-  dir.create(out_sample_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(out_pair_dir, recursive = TRUE, showWarnings = FALSE)
 
-  consensus <- .load_sample_consensus_table(amplicon_sample_dir, sample_id)
+  consensus <- .load_sample_consensus_table(amplicon_pair_dir, index_pair_id)
   n_consensus <- nrow(consensus)
 
   id_merge <- if (!is.null(min_identity)) {
@@ -279,7 +285,7 @@ doReassessAssemblies <- function(
   )
   utils::write.table(
     pairwise,
-    file = file.path(out_sample_dir, "consensus_pairwise.tsv"),
+    file = file.path(out_pair_dir, "consensus_pairwise.tsv"),
     sep = "\t",
     row.names = FALSE,
     quote = FALSE
@@ -292,15 +298,15 @@ doReassessAssemblies <- function(
   )
   utils::write.table(
     near_dup,
-    file = file.path(out_sample_dir, "consensus_near_duplicate_groups.tsv"),
+    file = file.path(out_pair_dir, "consensus_near_duplicate_groups.tsv"),
     sep = "\t",
     row.names = FALSE,
     quote = FALSE
   )
 
   u1 <- .load_or_infer_u1_reads(
-    sample_id = sample_id,
-    amplicon_sample_dir = amplicon_sample_dir,
+    index_pair_id = index_pair_id,
+    amplicon_pair_dir = amplicon_pair_dir,
     gene_assign = gene_assign,
     consensus = consensus,
     primers = primers,
@@ -317,7 +323,7 @@ doReassessAssemblies <- function(
   )
   utils::write.table(
     assign_tbl,
-    file = file.path(out_sample_dir, "unassigned_to_consensus.tsv"),
+    file = file.path(out_pair_dir, "unassigned_to_consensus.tsv"),
     sep = "\t",
     row.names = FALSE,
     quote = FALSE
@@ -332,7 +338,7 @@ doReassessAssemblies <- function(
   }
 
   data.frame(
-    sample_id = sample_id,
+    index_pair_id = index_pair_id,
     backend = backend,
     n_consensus = as.integer(n_consensus),
     n_near_duplicate_groups = as.integer(
@@ -353,14 +359,14 @@ doReassessAssemblies <- function(
 ################################################################################
 
 #' @keywords internal
-.load_sample_consensus_table <- function(sample_dir, sample_id) {
+.load_sample_consensus_table <- function(sample_dir, index_pair_id) {
   counts_path <- file.path(sample_dir, "cluster_counts.tsv")
   fa_path <- file.path(sample_dir, "consensus.fasta")
   if (file.exists(counts_path)) {
-    counts <- utils::read.delim(counts_path, stringsAsFactors = FALSE)
+    counts <- .ensure_index_pair_col(utils::read.delim(counts_path, stringsAsFactors = FALSE))
   } else {
     counts <- data.frame(
-      sample_id = character(),
+      index_pair_id = character(),
       gene_id = character(),
       cluster_id = integer(),
       n_reads = integer(),
@@ -382,12 +388,16 @@ doReassessAssemblies <- function(
     stringsAsFactors = FALSE
   )
   if (nrow(counts) < 1L) {
-    seq_map$sample_id <- sample_id
+    seq_map$index_pair_id <- index_pair_id
     seq_map$n_reads <- NA_integer_
     return(seq_map)
   }
   if (!"seq" %in% names(counts)) {
     counts <- merge(counts, seq_map, by = c("gene_id", "cluster_id"), all.x = TRUE)
+  }
+  if (!"index_pair_id" %in% names(counts) ||
+      any(is.na(counts$index_pair_id) | !nzchar(as.character(counts$index_pair_id)))) {
+    counts$index_pair_id <- index_pair_id
   }
   counts
 }
@@ -411,7 +421,7 @@ doReassessAssemblies <- function(
 #' @keywords internal
 .empty_assign <- function() {
   data.frame(
-    sample_id = character(),
+    index_pair_id = character(),
     gene_id = character(),
     read_id = character(),
     reason = character(),
@@ -566,7 +576,7 @@ doReassessAssemblies <- function(
     }
     pass <- !is.na(best_d) && best_d <= as.integer(max_edit)
     rows[[i]] <- data.frame(
-      sample_id = u1$sample_id[[i]],
+      index_pair_id = u1$index_pair_id[[i]],
       gene_id = gid,
       read_id = u1$read_id[[i]],
       reason = u1$reason[[i]],
@@ -652,7 +662,7 @@ doReassessAssemblies <- function(
     if (nrow(u_sub) < 1L || nrow(c_sub) < 1L) {
       for (i in which(u1$gene_id == gid)) {
         parts[[length(parts) + 1L]] <- data.frame(
-          sample_id = u1$sample_id[[i]],
+          index_pair_id = u1$index_pair_id[[i]],
           gene_id = gid,
           read_id = u1$read_id[[i]],
           reason = u1$reason[[i]],
@@ -685,7 +695,7 @@ doReassessAssemblies <- function(
       h <- best[[rid]]
       if (is.null(h)) {
         parts[[length(parts) + 1L]] <- data.frame(
-          sample_id = u_sub$sample_id[[i]],
+          index_pair_id = u_sub$index_pair_id[[i]],
           gene_id = gid,
           read_id = rid,
           reason = u_sub$reason[[i]],
@@ -710,7 +720,7 @@ doReassessAssemblies <- function(
         }
         pass <- !is.na(pident) && (pident / 100) >= as.numeric(min_identity)
         parts[[length(parts) + 1L]] <- data.frame(
-          sample_id = u_sub$sample_id[[i]],
+          index_pair_id = u_sub$index_pair_id[[i]],
           gene_id = gid,
           read_id = rid,
           reason = u_sub$reason[[i]],
@@ -987,7 +997,7 @@ doReassessAssemblies <- function(
 #' @keywords internal
 .consensus_near_duplicate_groups <- function(consensus, pairwise) {
   empty_groups <- data.frame(
-    sample_id = character(),
+    index_pair_id = character(),
     gene_id = character(),
     group_id = integer(),
     member_cluster_ids = character(),
@@ -1032,7 +1042,7 @@ doReassessAssemblies <- function(
       top_row <- member_rows[ord[[1]], , drop = FALSE]
       sum_n <- sum(as.integer(member_rows$n_reads), na.rm = TRUE)
       group_rows[[length(group_rows) + 1L]] <- data.frame(
-        sample_id = as.character(top_row$sample_id[[1]]),
+        index_pair_id = as.character(top_row$index_pair_id[[1]]),
         gene_id = gid,
         group_id = next_group,
         member_cluster_ids = paste(members, collapse = ","),
@@ -1050,8 +1060,8 @@ doReassessAssemblies <- function(
 }
 
 #' @keywords internal
-.load_or_infer_u1_reads <- function(sample_id,
-                                    amplicon_sample_dir,
+.load_or_infer_u1_reads <- function(index_pair_id,
+                                    amplicon_pair_dir,
                                     gene_assign,
                                     consensus,
                                     primers,
@@ -1059,7 +1069,7 @@ doReassessAssemblies <- function(
                                     read_assign_max_edit,
                                     n_core) {
   empty <- data.frame(
-    sample_id = character(),
+    index_pair_id = character(),
     gene_id = character(),
     read_id = character(),
     reason = character(),
@@ -1067,13 +1077,13 @@ doReassessAssemblies <- function(
     layer = character(),
     stringsAsFactors = FALSE
   )
-  u_path <- file.path(amplicon_sample_dir, "unassigned_to_cluster.tsv")
+  u_path <- file.path(amplicon_pair_dir, "unassigned_to_cluster.tsv")
   if (file.exists(u_path) && !is.null(gene_assign)) {
-    u <- utils::read.delim(u_path, stringsAsFactors = FALSE)
-    u <- u[u$sample_id == sample_id, , drop = FALSE]
+    u <- .ensure_index_pair_col(utils::read.delim(u_path, stringsAsFactors = FALSE))
+    u <- u[u$index_pair_id == index_pair_id, , drop = FALSE]
     if (nrow(u) < 1L) return(empty)
     ga <- gene_assign[
-      gene_assign$sample_id == sample_id &
+      gene_assign$index_pair_id == index_pair_id &
         gene_assign$read_id %in% u$read_id,
       ,
       drop = FALSE
@@ -1081,13 +1091,13 @@ doReassessAssemblies <- function(
     seq_map <- .oriented_inserts_for_reads(ga, primers, max_primer_edit, n_core)
     out <- merge(u, seq_map, by = c("gene_id", "read_id"), all.x = TRUE)
     out$layer <- "U1"
-    out$sample_id <- sample_id
-    return(out[, c("sample_id", "gene_id", "read_id", "reason", "seq", "layer")])
+    out$index_pair_id <- index_pair_id
+    return(out[, c("index_pair_id", "gene_id", "read_id", "reason", "seq", "layer")])
   }
 
   if (is.null(gene_assign) || nrow(consensus) < 1L) return(empty)
   ga <- gene_assign[
-    gene_assign$sample_id == sample_id &
+    gene_assign$index_pair_id == index_pair_id &
       .is_processable_gene_row(gene_assign$gene_id, gene_assign$assign_status),
     ,
     drop = FALSE
@@ -1100,7 +1110,7 @@ doReassessAssemblies <- function(
     cons <- consensus[consensus$gene_id == gid, , drop = FALSE]
     if (nrow(cons) < 1L) {
       rows[[length(rows) + 1L]] <- data.frame(
-        sample_id = sample_id,
+        index_pair_id = index_pair_id,
         gene_id = gid,
         read_id = seq_map$read_id[[i]],
         reason = "inferred_no_consensus",
@@ -1121,7 +1131,7 @@ doReassessAssemblies <- function(
     }
     if (!is.finite(best) || best > as.integer(read_assign_max_edit)) {
       rows[[length(rows) + 1L]] <- data.frame(
-        sample_id = sample_id,
+        index_pair_id = index_pair_id,
         gene_id = gid,
         read_id = seq_map$read_id[[i]],
         reason = "inferred_far_from_consensus",
@@ -1153,7 +1163,7 @@ doReassessAssemblies <- function(
       gene_id = gr$gene_id[[1]],
       max_primer_edit = max_primer_edit,
       n_core = n_core,
-      strict_end_trim = FALSE
+      strict_end_trim = TRUE
     )
     data.frame(
       gene_id = gr$gene_id[[1]],

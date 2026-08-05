@@ -35,7 +35,7 @@ struct WinSeq {
 struct PamRow {
     std::string target_gene;
     std::string guide_id;
-    int cut_insert = 0;
+    int cut_amplicon = 0;
     int win_start = 0;
     int win_end = 0;
 };
@@ -133,36 +133,21 @@ struct Bounds {
 };
 
 Bounds gapped_window_bounds(const std::string& ref_aln, int start_u, int end_u) {
-    const int target_len = end_u - start_u;
-    int n_ins = 0;
-    const int prefix_len = start_u - 1;
-    for (int i = 0; i < prefix_len && i < static_cast<int>(ref_aln.size()); ++i) {
-        if (ref_aln[static_cast<size_t>(i)] == '-') ++n_ins;
-    }
-    const int target_start = start_u + n_ins;
-    std::string target_rest;
-    if (target_start >= 1 && target_start <= static_cast<int>(ref_aln.size())) {
-        target_rest = ref_aln.substr(static_cast<size_t>(target_start - 1));
-    }
-    int target_end = target_len;
-    int detected_ins = 0;
-    while (true) {
-        int n = 0;
-        const int lim = std::min(target_end, static_cast<int>(target_rest.size()));
-        for (int i = 0; i < lim; ++i) {
-            if (target_rest[static_cast<size_t>(i)] == '-') ++n;
-        }
-        if (n > detected_ins) {
-            target_end += (n - detected_ins);
-            detected_ins = n;
-        } else {
+    int seen = 0;
+    int gstart = -1;
+    int gend = -1;
+    for (int i = 0; i < static_cast<int>(ref_aln.size()); ++i) {
+        if (ref_aln[static_cast<size_t>(i)] == '-') continue;
+        ++seen;
+        if (seen == start_u && gstart < 0) gstart = i + 1; // 1-based
+        if (seen == end_u) {
+            gend = i + 1;
             break;
         }
     }
-    target_end = target_start + target_end;
     Bounds b;
-    b.start = target_start;
-    b.end = target_end;
+    b.start = gstart;
+    b.end = gend;
     return b;
 }
 
@@ -280,7 +265,7 @@ std::vector<JointEv> classify_joint_events(
     if (pam_rows.size() < 2) return events;
     std::sort(pam_rows.begin(), pam_rows.end(),
               [](const PamRow& a, const PamRow& b) {
-                  if (a.cut_insert != b.cut_insert) return a.cut_insert < b.cut_insert;
+                  if (a.cut_amplicon != b.cut_amplicon) return a.cut_amplicon < b.cut_amplicon;
                   if (a.guide_id != b.guide_id) return a.guide_id < b.guide_id;
                   return a.target_gene < b.target_gene;
               });
@@ -292,8 +277,8 @@ std::vector<JointEv> classify_joint_events(
         const std::string& tg_j = row_j.target_gene;
         const std::string guide_i = !row_i.guide_id.empty() ? row_i.guide_id : tg_i;
         const std::string guide_j = !row_j.guide_id.empty() ? row_j.guide_id : tg_j;
-        const int c_i = row_i.cut_insert;
-        const int c_j = row_j.cut_insert;
+        const int c_i = row_i.cut_amplicon;
+        const int c_j = row_j.cut_amplicon;
         const int expected = c_j - c_i;
         const int del_span = count_query_deletions(ref_aln, query_aln, c_i, c_j);
         const int left_u = std::max(1, c_i - check_window);
@@ -441,7 +426,7 @@ List editcall_process_reads_cpp(CharacterVector sample_id,
                                 CharacterVector pam_gene,
                                 CharacterVector pam_target_gene,
                                 CharacterVector pam_guide_id,
-                                IntegerVector pam_cut_insert,
+                                IntegerVector pam_cut_amplicon,
                                 IntegerVector pam_win_start,
                                 IntegerVector pam_win_end,
                                 CharacterVector ref_gene_id,
@@ -470,7 +455,7 @@ List editcall_process_reads_cpp(CharacterVector sample_id,
             row.guide_id = as<std::string>(pam_guide_id[i]);
             if (row.guide_id == "NA") row.guide_id.clear();
         }
-        row.cut_insert = pam_cut_insert[i];
+        row.cut_amplicon = pam_cut_amplicon[i];
         row.win_start = pam_win_start[i];
         row.win_end = pam_win_end[i];
         pams[as<std::string>(pam_gene[i])].push_back(std::move(row));

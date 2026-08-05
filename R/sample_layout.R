@@ -5,7 +5,14 @@
     if (!file.exists(sample_list)) {
         stop("sample_list not found: ", sample_list)
     }
-    sl <- utils::read.csv(sample_list, header = FALSE, stringsAsFactors = FALSE)
+    sl <- .read_list_csv(
+        sample_list,
+        min_cols = 5L,
+        header_tokens = c(
+            "index_pair_id", "index_pair", "sample_name", "sample_id",
+            "plate_id", "plate", "row_id", "row", "col_id", "col", "column"
+        )
+    )
     if (ncol(sl) < 5L) {
         stop(
             "sample_list needs 5 columns: ",

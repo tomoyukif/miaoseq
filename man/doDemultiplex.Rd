@@ -27,13 +27,16 @@ doDemultiplex(
 
 \item{demult_dir}{Output directory for demultiplex results.}
 
-\item{index_list}{Path to a 5-column headerless CSV:
+\item{index_list}{Path to a 5-column CSV (header optional):
 \code{index_pair_id}, forward index ID, forward index sequence,
-reverse index ID, reverse index sequence.}
+reverse index ID, reverse index sequence. Duplicate \code{index_pair_id}
+or F+R pairs stop the run. At least two unique F and two unique R
+index sequences are required.}
 
 \item{sample_list}{Optional path to a CSV with at least
 \code{index_pair_id} and \code{sample_name} (headerless or with header).
-If omitted, \code{sample_id} equals \code{index_pair_id}.}
+Duplicate \code{sample_name} values are allowed. If omitted, \code{sample_id}
+equals \code{index_pair_id}.}
 
 \item{n_core}{Number of OpenMP threads for the C++ core (\code{1} disables).}
 
@@ -41,7 +44,9 @@ If omitted, \code{sample_id} equals \code{index_pair_id}.}
 
 \item{max_anchor_edit}{Maximum edit distance for suffix detection.}
 
-\item{max_barcode_edit}{Maximum edit distance for barcode mutant dictionary.}
+\item{max_barcode_edit}{Maximum edit distance for barcode mutant dictionary
+(default 2). Values above 2 are implemented. The cap is the shorter of
+the F/R barcode lengths; larger values error.}
 
 \item{allow_revcomp}{If \code{TRUE}, also search reverse-complement windows.}
 
@@ -51,7 +56,7 @@ ID appears in exactly one index pair (non-combinatorial layout). On
 combinatorial plates (shared F/R IDs across wells), the run stops at
 startup. Conflicting hits on both ends are rejected as \code{ambiguous_ends}.}
 
-\item{split_reads}{If \code{TRUE}, write per-sample FASTQ under
+\item{split_reads}{If \code{TRUE}, write one FASTQ per \code{index_pair_id} under
 \verb{demult_dir/by_sample/} in the same streaming pass.}
 
 \item{compress}{If \code{TRUE} and \code{split_reads = TRUE}, write \code{.fq.gz}.}
@@ -77,5 +82,8 @@ Classifies multiplexed FASTQ reads into samples using a two-step procedure
 implemented in C++ (edlib HW for adapter \strong{suffix} anchors; barcode matching
 via a precomputed mutant dictionary). FASTQ is streamed in chunks (no full
 Biostrings load). Assignment tables are written incrementally; when
-\code{split_reads = TRUE}, per-sample FASTQ files are written in the same pass.
+\code{split_reads = TRUE}, one FASTQ per \code{index_pair_id} is written in the same
+pass. \code{sample_name} / \code{sample_id} may be duplicated across wells; grouping
+and file names always use \code{index_pair_id}. \code{sample_id} is a per-read label
+only (used as a reference label in editcall output).
 }

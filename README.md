@@ -1,12 +1,12 @@
 # miaoseq
 
-**Version 0.2.0** — see [inst/NEWS.md](inst/NEWS.md) for the changelog.
+**Version 0.4.0** — see [inst/NEWS.md](inst/NEWS.md) for the changelog.
 
 **miaoseq** is an R package for multiplexed indexed amplicon ONT sequencing (MIAOseq), focused on analysing CRISPR-Cas9 editing outcomes from Oxford Nanopore data.
 
 The workflow starts from **user-provided FASTQ** (basecall outside R), then:
 
-1. **Demultiplex** — assign reads to samples (`doDemultiplex`, edlib)
+1. **Demultiplex** — assign reads to index pairs (`doDemultiplex`, edlib)
 2. **Gene assignment** — assign/orient/filter reads (`doAssignGenes`)
 3. Then either:
    - **Editcall (primary)** — per-read PAM-window alleles (`doEditcall`)
@@ -24,7 +24,7 @@ splitDemultiplexReads(...)  → demultiplex/by_sample/*.fq.gz
 doAssignGenes(...)          → amplicon_assign/gene_assignments.tsv
    ↓                            (length_outlier labeled when amplicon_fn set; not dropped)
    ├── Path B (editcall): doEditcall(gene_assign, ...) → editcall/
-   └── Path A (assemble): doAssembleAmplicons(...) → amplicon/{sample}/
+   └── Path A (assemble): doAssembleAmplicons(...) → amplicon/{index_pair_id}/
                               optional: doReassessAssemblies(...) → amplicon_reassess/
 ```
 
@@ -82,7 +82,7 @@ Uses exact primer matching (`Biostrings::matchPattern`) against the reference ge
 
 ### Step 1 — Demultiplex
 
-Prefer a **1:1** index layout (each F/R ID used once) or barcodes with Hamming distance ≥ `2 * max_barcode_edit + 1`. Combinatorial plates (shared F/R IDs across wells) are allowed, but risk of a false dual hit landing in another legal well is on the user — on such layouts, a wrong dual assignment can still map to a valid well.
+Prefer a **1:1** index layout (each F/R ID used once) or barcodes with Hamming distance ≥ `2 * max_barcode_edit + 1`. Combinatorial plates (shared F/R IDs across wells) are allowed, but risk of a false dual hit landing in another legal well is on the user — on such layouts, a wrong dual assignment can still map to a valid well. `sample_list` `sample_name` values may be duplicated; demux FASTQ / summaries are always one row or file per `index_pair_id`.
 
 ```r
 dem <- doDemultiplex(
@@ -148,12 +148,14 @@ edit <- doEditcall(
 ```
 
 Outputs: `editcall_all.csv`, `editcall_filtered.csv`, `editcall_summary.csv`, `intact_seq.fa`,
-`run_stats.txt` (plus `editcall_joint*.csv` when a gene has multiple PAMs). Tables include both
-`sample_id` and `index_pair_id`; the latter is filled from demultiplex
-`assignments.tsv` (`doEditcall(assignments=...)`, or `../demultiplex/assignments.tsv`
-beside `editcall_dir`). Editcall keeps gene primers in the aligned span (only
-outer adapters are removed) and places PAM windows on the full `amplicon.fa`
-coordinates.
+`run_stats.txt` (plus `editcall_joint*.csv` when a gene has multiple PAMs). Alleles and
+summaries are keyed by `index_pair_id`. `sample_id` is a reference label only
+(from `sample_list` / demultiplex `assignments.tsv`). Editcall keeps gene primers
+in the aligned span (only outer adapters are removed) and places PAM windows on
+the full `amplicon.fa` coordinates. After `min_count`, alleles with
+`count > top/2` in each `index_pair_id × target_gene` are kept. `intact_seq.fa`
+is the fixed genome ±`check_window` WT slice; compare alleles to CSV `ref_seq`,
+not that FA.
 
 ### Step 3′ — Amplicon assembly (Path A; optional)
 
@@ -166,13 +168,14 @@ amp <- doAssembleAmplicons(
   min_cluster_identity = 0.95,  # vsearch --id; accepts (0, 1] (no 0.5 floor)
   min_reads = 5,
   min_cluster_reads = 5,
+  # strict_end_trim = TRUE,  # default: cluster trimmed inserts only
   # min_cluster_purity = 0.8,  # default NULL (disabled); set for strict filtering
   # assembly_backend = "overlap_graph",  # optional graph-based modal paths
   overwrite = TRUE
 )
 ```
 
-Per sample, assemble writes `consensus.fasta`, `clusters.fasta`,
+Per `index_pair_id`, assemble writes `consensus.fasta`, `clusters.fasta`,
 `cluster_counts.tsv`, `stats.tsv`, and `unassigned_to_cluster.tsv`
 (U1 membership for Reassess).
 
@@ -190,11 +193,11 @@ re <- doReassessAssemblies(
   # min_identity = NULL,  # if unset: 1 - edit/median_len, clamped to [0.50, 0.99]
   overwrite = TRUE
 )
-# → summary_by_sample.tsv (long; one row per sample×backend)
+# → summary_by_sample.tsv (long; one row per index_pair_id×backend)
 # → summary_compare.tsv (wide; reassignable_frac / near-dup groups side-by-side)
-# → {backend}/{sample}/consensus_pairwise.tsv
-# → {backend}/{sample}/consensus_near_duplicate_groups.tsv  (review only)
-# → {backend}/{sample}/unassigned_to_consensus.tsv
+# → {backend}/{index_pair_id}/consensus_pairwise.tsv
+# → {backend}/{index_pair_id}/consensus_near_duplicate_groups.tsv  (review only)
+# → {backend}/{index_pair_id}/unassigned_to_consensus.tsv
 # Does not modify amplicon/ and does not write merged sequences.
 ```
 
@@ -207,15 +210,22 @@ evalMiao(out_dir, output_reads = FALSE)
 editViewer(out_dir, sample_list = "/path/to/sample_list.csv")
 # → editviewer/edit_viewer_plate*.pdf
 # Dual-guide / dual-cut: also open editcall/editcall_joint_summary.csv
+# Uniq/Dup on the PDF compares wells that share sample_name (not index_pair_id).
+# In-frame colors use |n_ins - n_del| mod 3 only (not CDS phase).
 ```
 
-`sample_list` is a headerless CSV with **plate well coordinates**, not barcode/index sequences:
+`sample_list` is a CSV with **plate well coordinates** (header optional), not barcode/index sequences:
 
 ```text
 index_pair_id,sample_name,plate_id,row_id,col_id
 miaoBC0001,sample01,plate1,A,1
 miaoBC0009,sample02,plate1,A,2
 ```
+
+Duplicate `sample_name` values are allowed. Downstream processing never
+aggregates by `sample_name` / `sample_id`; the well key is always
+`index_pair_id`. `sample_id` appears on editcall allele tables only as a
+reference label.
 
 - `row_id`: `A`–`H`
 - `col_id`: `1`–`12`
@@ -225,14 +235,15 @@ Do **not** pass `index_list.csv` (barcode file) as `sample_list`.
 ## Input file formats
 
 #### Primer list (`primer_list`)
-CSV, two columns: primer ID (`*_F` / `*_R`), sequence.
+CSV, two columns: primer ID (`*_F` / `*_R`), sequence. Header row optional.
+Required for `doAssignGenes()` and `doAssembleAmplicons()` (`NULL` / no-ref mode is not supported).
 
 #### Index list (`index_list`)
-CSV, five columns: index pair ID, F index ID, F sequence, R index ID, R sequence.
+CSV, five columns: index pair ID, F index ID, F sequence, R index ID, R sequence. Header row optional. At least two unique F and two unique R index sequences are required.
 On combinatorial layouts, a spurious dual barcode call may still match another plate well; prefer 1:1 pairing or high inter-barcode distance when cross-talk must be minimized.
 
 #### PAM list (`pam_list`)
-CSV (no header):
+CSV (header optional):
 
 1. gene ID matching primer / `amplicon.fa` names
 2. chromosome / seqname matching genome FASTA headers **exactly** (no automatic `chr` / zero-pad)
@@ -244,7 +255,7 @@ A locus with **one PAM row** is labelled by gene only (`target_gene = SD1`), eve
 Multiple guides on one amplicon: same gene ID + distinct guide column — guide-level alleles (Plan A) plus dual-cut excision (`editcall_joint*.csv`, Plan A′). Plan A may count an excision read on **both** guides; that double counting is intentional. With three or more guides, if both adjacent pairs are excision the middle guide Plan A allele is the token `---`. For pair-level excision rates read `editcall_joint_summary.csv` (editViewer does not load joint files). See `cursor_dev/pipeline_revise.md` §7.3–7.4 / §20.
 
 #### Assemble column note (`fraction_bucket`)
-In `cluster_counts.tsv`, `fraction_bucket` is the fraction of reads in the **sample × gene bucket**, not of all demultiplexed reads for the sample (formerly `fraction_sample`). `fraction` is within that gene after clustering. Minor clusters below `min_cluster_reads` (default 5) are excluded; `max_clusters` defaults to `Inf` (no top-N truncation).
+In `cluster_counts.tsv`, `fraction_bucket` is the fraction of reads in the **`index_pair_id` × gene bucket after primer trim (cluster input)**, not of all demultiplexed reads for the well (formerly `fraction_sample`). `fraction` is within that gene after clustering. Minor clusters below `min_cluster_reads` (default 5) are excluded; `max_clusters` defaults to `Inf` (no top-N truncation).
 
 #### Clustering identity note
 Assemble clustering uses **vsearch** only (`--cluster_fast`, `--iddef 2`) with `--id = min_cluster_identity` (default **0.95**, range **(0, 1]** — values below 0.5 are allowed for aggressive merging sweeps). Consensus is **abpoa** (FASTA, no quality weighting, no racon polish). `clusters.fasta` holds member reads (`>{read_id} {cluster_id}`).
@@ -253,7 +264,7 @@ Rough tuning guide for `min_cluster_identity` (ONT ~1–2 kb inserts; exact numb
 
 | Setting | Typical effect |
 |---------|----------------|
-| **~0.4–0.6** | Strong merging — often ~1 retained cluster per sample×gene, with most reads assigned. Good when a single dominant template is expected (e.g. clonal / colony DNA). |
+| **~0.4–0.6** | Strong merging — often ~1 retained cluster per index_pair×gene, with most reads assigned. Good when a single dominant template is expected (e.g. clonal / colony DNA). |
 | **~0.8–0.9** | Often a practical balance: high assignment rate, a few secondary clusters allowed. |
 | **0.95 (default)** | More separation; more reads may fall below `min_cluster_reads` as tiny clusters. |
 | **≥0.98–0.99** | Very strict — many ONT-error shards fail the minor-cluster filter, so assignment rate can collapse even when true diversity is low. |
@@ -277,14 +288,14 @@ Default `backend = "edlib"` provides an independent exact edit-distance evaluati
     unassigned.tsv
     summary_by_sample.tsv
     stats_unassigned.tsv        # optional (stats_unassign = TRUE)
-    by_sample/                  # optional (split_reads / splitDemultiplexReads)
+    by_sample/                  # optional; one FASTQ per index_pair_id
   amplicon_assign/
-    gene_assignments.tsv        # doAssignGenes (length_outlier labeled, not dropped)
+    gene_assignments.tsv        # keyed by index_pair_id
     stats_unassigned.tsv        # optional
   amplicon/                     # doAssembleAmplicons
     summary_by_sample.tsv
     run_stats.txt
-    {sample_id}/
+    {index_pair_id}/
       consensus.fasta
       clusters.fasta
       cluster_counts.tsv
@@ -293,7 +304,7 @@ Default `backend = "edlib"` provides an independent exact edit-distance evaluati
   amplicon_reassess/            # doReassessAssemblies (optional)
     summary_by_sample.tsv
     summary_compare.tsv
-    {backend}/{sample_id}/...
+    {backend}/{index_pair_id}/...
   editcall/
     editcall_all.csv
     editcall_filtered.csv
@@ -307,14 +318,14 @@ Default `backend = "edlib"` provides an independent exact edit-distance evaluati
 
 ## Troubleshooting
 
-1. **Demux assigned ≫ processable gene-assign rows** — with `amplicon_fn`, length outliers stay in `gene_assignments.tsv` as `assign_status = "length_outlier"` (not dropped, not counted as `no_primer_hit`). Downstream Editcall / Assemble use `assigned` + `length_outlier` by default. Check `stats_unassigned.tsv` for primer-miss reasons only.
+1. **Demux assigned ≫ processable gene-assign rows** — with `amplicon_fn`, length outliers stay in `gene_assignments.tsv` as `assign_status = "length_outlier"` (not dropped, not counted as `no_primer_hit`). Downstream Editcall / Assemble use `assigned` + `length_outlier` + `trim_fail` by default. Check `stats_unassigned.tsv` for primer-miss reasons only. `trim_fail` is primer-span trim failure; `length_outlier` is a successful trim with unexpected insert length.
 2. **Empty amplicon clusters** — check `skip_reason` in `stats.tsv` (`low_gene_reads`, `no_gene_assigned`, `no_clusters`).
 3. **Slow resolve without `by_sample`** — provide `sample_fastq_dir`, or accept a single FASTQ pass.
 4. **Tool binaries not found** — Assemble requires `vsearch` and `abpoa` on `PATH`. Use `cursor_dev/containers/pull_sifs.sh` to pull Apptainer images and add `cursor_dev/containers/bin/` to `PATH`. Reassess optionally uses `blastn` / `mmseqs`.
 
 ## Further documentation
 
-- `cursor_dev/pipeline_revise.md` — pipeline redesign (§20 review lock, §21 speed)
+- `cursor_dev/pipeline_revise.md` — pipeline redesign (§20 review lock, §21 speed, §22 `index_pair_id` grouping)
 - `cursor_dev/demux_revise.md` — demultiplex design
 - `cursor_dev/ampliconresolve_plan.md` — amplicon resolve phases
 - `cursor_dev/editcall_adapter.md` — Editcall connection / API

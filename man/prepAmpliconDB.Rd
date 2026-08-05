@@ -34,6 +34,8 @@ amplicons from \code{genome_fn}; intervals longer than
 Either locates forward/reverse primers in a reference genome with exact
 matching and extracts amplicon intervals, or accepts a user-supplied amplicon
 FASTA. Genome derivation stops on multi-locus hits or over-long spans.
+Sequences are oriented so the forward primer is at the 5' end
+(primer-inclusive F to R). User FASTA must match that contract.
 }
 \examples{
 # amplicon_fn <- prepAmpliconDB(

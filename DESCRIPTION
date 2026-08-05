@@ -1,12 +1,12 @@
 Package: miaoseq
 Title: MiaoSeq - A comprehensive pipeline for sequencing data analysis
-Version: 0.2.0
-Date: 2026-07-16
+Version: 0.4.0
+Date: 2026-08-06
 Authors@R:
     person("Tomoyuki", "Furuta", , "f.tomoyuki@okayama-u.ac.jp", role = c("aut", "cre"))
 Description: MiaoSeq provides a pipeline for multiplexed ONT amplicon
-    sequencing: demultiplexing, per-sample amplicon resolution, and
-    edit-calling from user-provided FASTQ.
+    sequencing: demultiplexing, per-well (index-pair) amplicon resolution,
+    and edit-calling from user-provided FASTQ.
 License: `use_mit_license()`
 Encoding: UTF-8
 Imports:

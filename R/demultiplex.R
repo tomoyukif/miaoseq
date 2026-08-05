@@ -15,33 +15,68 @@
     normalizePath(path, winslash = "/", mustWork = mustWork)
 }
 
+#' Read a list CSV, optionally dropping a header row.
+#' @keywords internal
+.read_list_csv <- function(path, min_cols = 1L, header_tokens = character()) {
+    df <- utils::read.csv(path, header = FALSE, stringsAsFactors = FALSE)
+    if (ncol(df) < as.integer(min_cols)) {
+        stop(basename(path), " must have at least ", min_cols, " column(s).")
+    }
+    if (nrow(df) < 1L) {
+        return(df)
+    }
+    first <- tolower(trimws(as.character(unlist(df[1L, , drop = TRUE]))))
+    tokens <- tolower(as.character(header_tokens))
+    if (length(tokens) > 0L && any(first %in% tokens)) {
+        df <- df[-1L, , drop = FALSE]
+        rownames(df) <- NULL
+    }
+    df
+}
+
+#' Shared by_sample filename sanitization (must match C++ safe_filename).
+#' @keywords internal
+.safe_filename <- function(x) {
+    x <- as.character(x)
+    x[is.na(x)] <- ""
+    gsub("[^A-Za-z0-9._-]", "_", x, perl = TRUE)
+}
+
 #' Demultiplex reads by dual barcodes
 #'
 #' Classifies multiplexed FASTQ reads into samples using a two-step procedure
 #' implemented in C++ (edlib HW for adapter **suffix** anchors; barcode matching
 #' via a precomputed mutant dictionary). FASTQ is streamed in chunks (no full
 #' Biostrings load). Assignment tables are written incrementally; when
-#' `split_reads = TRUE`, per-sample FASTQ files are written in the same pass.
+#' `split_reads = TRUE`, one FASTQ per `index_pair_id` is written in the same
+#' pass. `sample_name` / `sample_id` may be duplicated across wells; grouping
+#' and file names always use `index_pair_id`. `sample_id` is a per-read label
+#' only (used as a reference label in editcall output).
 #'
 #' @param fastq Character vector of FASTQ paths (`.fq` / `.fastq`, optionally `.gz`).
 #' @param demult_dir Output directory for demultiplex results.
-#' @param index_list Path to a 5-column headerless CSV:
+#' @param index_list Path to a 5-column CSV (header optional):
 #'   `index_pair_id`, forward index ID, forward index sequence,
-#'   reverse index ID, reverse index sequence.
+#'   reverse index ID, reverse index sequence. Duplicate `index_pair_id`
+#'   or F+R pairs stop the run. At least two unique F and two unique R
+#'   index sequences are required.
 #' @param sample_list Optional path to a CSV with at least
 #'   `index_pair_id` and `sample_name` (headerless or with header).
-#'   If omitted, `sample_id` equals `index_pair_id`.
+#'   Duplicate `sample_name` values are allowed. If omitted, `sample_id`
+#'   equals `index_pair_id`.
 #' @param n_core Number of OpenMP threads for the C++ core (`1` disables).
 #' @param end_window Bases from each read end to search for anchors.
 #' @param max_anchor_edit Maximum edit distance for suffix detection.
-#' @param max_barcode_edit Maximum edit distance for barcode mutant dictionary.
+#' @param max_barcode_edit Maximum edit distance for barcode mutant dictionary
+#'   (default 2). Values above 2 are implemented. The cap is the shorter of
+#'   the F/R barcode lengths; larger values error.
 #' @param allow_revcomp If `TRUE`, also search reverse-complement windows.
 #' @param allow_single_end If `TRUE`, assign reads when only one end (F or R)
 #'   yields a unique barcode hit. Allowed only when every F and every R barcode
 #'   ID appears in exactly one index pair (non-combinatorial layout). On
 #'   combinatorial plates (shared F/R IDs across wells), the run stops at
 #'   startup. Conflicting hits on both ends are rejected as `ambiguous_ends`.
-#' @param split_reads If `TRUE`, write per-sample FASTQ under
+#' @param split_reads If `TRUE`, write one FASTQ per `index_pair_id` under
 #'   `demult_dir/by_sample/` in the same streaming pass.
 #' @param compress If `TRUE` and `split_reads = TRUE`, write `.fq.gz`.
 #' @param chunk_size Reads per C++ batch (streaming to limit peak memory).
@@ -93,6 +128,15 @@ doDemultiplex <- function(fastq,
     }
 
     layout <- .parse_index_layout(index_list)
+    max_bc_cap <- min(as.integer(layout$f_barcode_len), as.integer(layout$r_barcode_len))
+    if (as.integer(max_barcode_edit) > max_bc_cap) {
+        stop(
+            "max_barcode_edit=", max_barcode_edit,
+            " exceeds barcode length cap (", max_bc_cap,
+            " bp; min of F/R barcode lengths).",
+            call. = FALSE
+        )
+    }
     .assert_single_end_allowed(layout, allow_single_end)
     sample_map <- .load_sample_map(sample_list, layout$sample_map)
     design <- .validate_barcode_design(layout, max_barcode_edit)
@@ -166,8 +210,8 @@ doDemultiplex <- function(fastq,
     )
 
     summary_df <- data.frame(
-        sample_id = as.character(res$summary_sample_id),
         index_pair_id = as.character(res$summary_index_pair_id),
+        sample_id = as.character(res$summary_sample_id),
         n_reads = as.integer(res$summary_n_reads),
         n_complete = as.integer(res$summary_n_complete),
         n_fuzzy = as.integer(res$summary_n_fuzzy),
@@ -178,6 +222,35 @@ doDemultiplex <- function(fastq,
     rownames(summary_df) <- NULL
     write.table(summary_df, file.path(demult_dir, "summary_by_sample.tsv"),
                 sep = "\t", quote = FALSE, row.names = FALSE)
+
+    n_incomplete <- as.integer(res$n_incomplete %||% 0L)
+    if (is.na(n_incomplete)) {
+        n_incomplete <- 0L
+    }
+    if (n_incomplete > 0L) {
+        warning(
+            "Dropped ", n_incomplete,
+            " incomplete trailing FASTQ record(s).",
+            call. = FALSE
+        )
+    }
+    .write_demux_run_stats(
+        demult_dir = demult_dir,
+        index_list = index_list,
+        sample_list = sample_list,
+        n_core = n_core,
+        end_window = end_window,
+        max_anchor_edit = max_anchor_edit,
+        max_barcode_edit = max_barcode_edit,
+        allow_revcomp = allow_revcomp,
+        allow_single_end = allow_single_end,
+        split_reads = split_reads,
+        n_records = res$n_records,
+        n_assigned = res$n_assigned,
+        n_unassigned = res$n_unassigned,
+        n_edlib = res$n_edlib,
+        n_incomplete = n_incomplete
+    )
 
     stats_unassigned_df <- NULL
     if (isTRUE(stats_unassign)) {
@@ -242,14 +315,15 @@ doDemultiplex <- function(fastq,
 
 #' Split a FASTQ by demultiplex assignments
 #'
-#' Writes one FASTQ per `sample_id` using `assignments` from [doDemultiplex()].
-#' Can be run after `doDemultiplex(..., split_reads = FALSE)`. Uses a C++
-#' streaming reader/writer (not line-by-line R I/O).
+#' Writes one FASTQ per `index_pair_id` using `assignments` from
+#' [doDemultiplex()]. Can be run after `doDemultiplex(..., split_reads = FALSE)`.
+#' Uses a C++ streaming reader/writer (not line-by-line R I/O).
 #'
 #' @param fastq Character vector of source FASTQ paths.
 #' @param assignments `assignments.tsv` path or a data.frame with
-#'   `read_id` and `sample_id` columns.
-#' @param out_dir Output directory for per-sample FASTQ files.
+#'   `read_id` and `index_pair_id` (legacy: `sample_id` is copied to
+#'   `index_pair_id` when the pair column is missing).
+#' @param out_dir Output directory for per-`index_pair_id` FASTQ files.
 #' @param compress If `TRUE`, write `.fq.gz`.
 #' @param include_unassigned If `TRUE`, also write `unassigned.fq(.gz)`.
 #' @param unassigned Optional unassigned table / TSV path (required when
@@ -257,7 +331,7 @@ doDemultiplex <- function(fastq,
 #'   `unassigned.tsv`).
 #' @param n_core Unused (reserved).
 #'
-#' @return Invisibly, a named integer vector of reads written per sample.
+#' @return Invisibly, a named integer vector of reads written per `index_pair_id`.
 #'
 #' @export
 #' @importFrom utils read.delim write.table
@@ -284,13 +358,36 @@ splitDemultiplexReads <- function(fastq,
 
 #' @keywords internal
 .parse_index_layout <- function(index_list) {
-    index_df <- utils::read.csv(index_list, header = FALSE, stringsAsFactors = FALSE)
+    index_df <- .read_list_csv(
+        index_list,
+        min_cols = 5L,
+        header_tokens = c(
+            "index_pair_id", "index_pair", "f_index_id", "r_index_id",
+            "f_seq", "r_seq", "forward_index_id", "reverse_index_id"
+        )
+    )
     if (ncol(index_df) < 5) stop("index_list must have 5 columns.")
     names(index_df)[1:5] <- c(
         "index_pair_id", "f_index_id", "f_seq", "r_index_id", "r_seq"
     )
     index_df$f_seq <- toupper(gsub("[^ACGT]", "", index_df$f_seq))
     index_df$r_seq <- toupper(gsub("[^ACGT]", "", index_df$r_seq))
+    if (anyDuplicated(index_df$index_pair_id)) {
+        stop(
+            "index_list has duplicated index_pair_id: ",
+            paste(unique(index_df$index_pair_id[duplicated(index_df$index_pair_id)]),
+                  collapse = ", "),
+            call. = FALSE
+        )
+    }
+    pair_key <- paste(index_df$f_index_id, index_df$r_index_id, sep = "\t")
+    if (anyDuplicated(pair_key)) {
+        stop(
+            "index_list has duplicated F+R index pairs: ",
+            paste(unique(pair_key[duplicated(pair_key)]), collapse = "; "),
+            call. = FALSE
+        )
+    }
 
     f_parts <- .decompose_index_seqs(index_df$f_seq[!duplicated(index_df$f_index_id)])
     r_parts <- .decompose_index_seqs(index_df$r_seq[!duplicated(index_df$r_index_id)])
@@ -325,6 +422,14 @@ splitDemultiplexReads <- function(fastq,
 .decompose_index_seqs <- function(seqs) {
     seqs <- as.character(seqs)
     if (length(seqs) < 1) stop("No index sequences to decompose.")
+    if (length(unique(seqs)) < 2L) {
+        stop(
+            "Could not detect common prefix/suffix in index sequences: ",
+            "at least 2 unique index sequences are required ",
+            "(\u30e6\u30cb\u30fc\u30af index \u304c 2 \u672c\u4ee5\u4e0a\u5fc5\u8981).",
+            call. = FALSE
+        )
+    }
     prefix_len <- .common_prefix_len(seqs)
     suffix_len <- .common_suffix_len(seqs)
     if (prefix_len < 1 || suffix_len < 1) {
@@ -443,7 +548,46 @@ splitDemultiplexReads <- function(fastq,
     names(sl)[1:2] <- c("index_pair_id", "sample_name")
     hit <- match(sample_map$index_pair_id, sl$index_pair_id)
     sample_map$sample_id[!is.na(hit)] <- sl$sample_name[hit[!is.na(hit)]]
+    if (anyDuplicated(sample_map$sample_id)) {
+        message(
+            "sample_list has duplicate sample_name values; ",
+            "outputs are keyed by index_pair_id ",
+            "(sample_id is a label only)."
+        )
+    }
     sample_map
+}
+
+#' Ensure a table has `index_pair_id` (legacy `sample_id`-only tables).
+#' @keywords internal
+.ensure_index_pair_col <- function(df) {
+    if (is.null(df) || !is.data.frame(df)) {
+        return(df)
+    }
+    if (!"index_pair_id" %in% names(df) && "sample_id" %in% names(df)) {
+        sid <- as.character(df$sample_id)
+        if (anyDuplicated(sid[!is.na(sid) & nzchar(sid)])) {
+            stop(
+                "Cannot copy sample_id to index_pair_id: sample_id values ",
+                "are not unique. Add an index_pair_id column and re-run.",
+                call. = FALSE
+            )
+        }
+        df$index_pair_id <- sid
+    }
+    df
+}
+
+#' Rename a legacy `sample_id` unit column to `index_pair_id`.
+#' @keywords internal
+.relabel_unit_col <- function(df) {
+    if (is.null(df) || !is.data.frame(df)) {
+        return(df)
+    }
+    if ("sample_id" %in% names(df) && !"index_pair_id" %in% names(df)) {
+        names(df)[names(df) == "sample_id"] <- "index_pair_id"
+    }
+    df
 }
 
 #' @keywords internal
@@ -643,20 +787,29 @@ splitDemultiplexReads <- function(fastq,
     if (nrow(gene_assignments) < 1L) {
         return(.stats_unassign_reason_table(character(), scope = "overall"))
     }
-    ok_status <- "assigned"
+    if (!"assign_status" %in% names(gene_assignments)) {
+        stop(
+            "gene_assignments is missing assign_status; re-run doAssignGenes().",
+            call. = FALSE
+        )
+    }
+    ok_status <- .processable_assign_statuses()
     is_unassigned <- is.na(gene_assignments$gene_id) |
         gene_assignments$gene_id == "" |
-        !(gene_assignments$assign_status %in% ok_status)
+        !(as.character(gene_assignments$assign_status) %in% ok_status)
     un_df <- gene_assignments[is_unassigned, , drop = FALSE]
     parts <- list(
         .stats_unassign_reason_table(un_df$assign_status, scope = "overall")
     )
-    if (nrow(un_df) > 0L && "sample_id" %in% names(un_df)) {
-        by_sample <- split(un_df$assign_status, un_df$sample_id)
+    un_df <- .ensure_index_pair_col(un_df)
+    if (nrow(un_df) > 0L && "index_pair_id" %in% names(un_df)) {
+        by_pair <- split(un_df$assign_status, un_df$index_pair_id)
         parts <- c(
             parts,
-            lapply(names(by_sample), function(sid) {
-                .stats_unassign_reason_table(by_sample[[sid]], scope = "sample", sample_id = sid)
+            lapply(names(by_pair), function(pid) {
+                .stats_unassign_reason_table(
+                    by_pair[[pid]], scope = "index_pair", sample_id = pid
+                )
             })
         )
     }
@@ -667,8 +820,8 @@ splitDemultiplexReads <- function(fastq,
 .summarize_assignments <- function(assignments) {
     if (nrow(assignments) < 1) {
         return(data.frame(
-            sample_id = character(),
             index_pair_id = character(),
+            sample_id = character(),
             n_reads = integer(),
             n_complete = integer(),
             n_fuzzy = integer(),
@@ -676,11 +829,12 @@ splitDemultiplexReads <- function(fastq,
             stringsAsFactors = FALSE
         ))
     }
-    spl <- split(assignments, assignments$sample_id)
+    assignments <- .ensure_index_pair_col(assignments)
+    spl <- split(assignments, assignments$index_pair_id)
     do.call(rbind, lapply(spl, function(df) {
         data.frame(
-            sample_id = df$sample_id[1],
             index_pair_id = df$index_pair_id[1],
+            sample_id = if ("sample_id" %in% names(df)) df$sample_id[1] else df$index_pair_id[1],
             n_reads = nrow(df),
             n_complete = sum(df$match_class == "complete_match"),
             n_fuzzy = sum(df$match_class == "fuzzy_match"),
@@ -742,21 +896,21 @@ splitDemultiplexReads <- function(fastq,
             }
         }
     } else {
-        assignments <- .as_assignment_df(assignments)
-        if (!all(c("read_id", "sample_id") %in% names(assignments))) {
-            stop("assignments must contain read_id and sample_id columns.")
+        assignments <- .ensure_index_pair_col(.as_assignment_df(assignments))
+        if (!all(c("read_id", "index_pair_id") %in% names(assignments))) {
+            stop("assignments must contain read_id and index_pair_id columns.")
         }
         tmp_assign <- tempfile(fileext = ".tsv")
         utils::write.table(
             data.frame(
                 read_id = assignments$read_id,
-                index_pair_id = if ("index_pair_id" %in% names(assignments))
-                    assignments$index_pair_id else assignments$sample_id,
+                index_pair_id = assignments$index_pair_id,
                 f_index_id = if ("f_index_id" %in% names(assignments))
                     assignments$f_index_id else "",
                 r_index_id = if ("r_index_id" %in% names(assignments))
                     assignments$r_index_id else "",
-                sample_id = assignments$sample_id,
+                sample_id = if ("sample_id" %in% names(assignments))
+                    assignments$sample_id else assignments$index_pair_id,
                 stringsAsFactors = FALSE
             ),
             tmp_assign, sep = "\t", quote = FALSE, row.names = FALSE
@@ -786,7 +940,12 @@ splitDemultiplexReads <- function(fastq,
         include_unassigned = isTRUE(include_unassigned),
         unassigned_tsv = un_tsv
     )
-    counts <- setNames(as.integer(res$n_reads), as.character(res$sample_id))
+    pair_names <- if ("index_pair_id" %in% names(res)) {
+        as.character(res$index_pair_id)
+    } else {
+        as.character(res$sample_id)
+    }
+    counts <- setNames(as.integer(res$n_reads), pair_names)
     invisible(counts)
 }
 
@@ -800,8 +959,47 @@ splitDemultiplexReads <- function(fastq,
 }
 
 #' @keywords internal
-.safe_filename <- function(x) {
-    gsub("[^A-Za-z0-9._-]+", "_", x)
+.write_demux_run_stats <- function(demult_dir,
+                                   index_list,
+                                   sample_list,
+                                   n_core,
+                                   end_window,
+                                   max_anchor_edit,
+                                   max_barcode_edit,
+                                   allow_revcomp,
+                                   allow_single_end,
+                                   split_reads,
+                                   n_records,
+                                   n_assigned,
+                                   n_unassigned,
+                                   n_edlib,
+                                   n_incomplete = 0L) {
+    pkg_ver <- tryCatch(
+        as.character(utils::packageVersion("miaoseq")),
+        error = function(e) NA_character_
+    )
+    write(
+        paste0(
+            "r_version=", R.version.string, "\n",
+            "miaoseq_version=", pkg_ver, "\n",
+            "index_list=", index_list, "\n",
+            "sample_list=", if (is.null(sample_list)) "" else sample_list, "\n",
+            "n_core=", n_core, "\n",
+            "end_window=", end_window, "\n",
+            "max_anchor_edit=", max_anchor_edit, "\n",
+            "max_barcode_edit=", max_barcode_edit, "\n",
+            "allow_revcomp=", allow_revcomp, "\n",
+            "allow_single_end=", allow_single_end, "\n",
+            "split_reads=", split_reads, "\n",
+            "n_records=", n_records, "\n",
+            "n_assigned=", n_assigned, "\n",
+            "n_unassigned=", n_unassigned, "\n",
+            "n_edlib=", n_edlib, "\n",
+            "n_incomplete_fastq_records=", n_incomplete, "\n"
+        ),
+        file = file.path(demult_dir, "run_stats.txt")
+    )
+    invisible(TRUE)
 }
 
 #' @keywords internal

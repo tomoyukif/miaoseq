@@ -69,65 +69,6 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
-// consensus_sequences_cpp
-std::string consensus_sequences_cpp(CharacterVector seqs, int max_edit);
-RcppExport SEXP _miaoseq_consensus_sequences_cpp(SEXP seqsSEXP, SEXP max_editSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< CharacterVector >::type seqs(seqsSEXP);
-    Rcpp::traits::input_parameter< int >::type max_edit(max_editSEXP);
-    rcpp_result_gen = Rcpp::wrap(consensus_sequences_cpp(seqs, max_edit));
-    return rcpp_result_gen;
-END_RCPP
-}
-// consensus_sequences_quality_cpp
-std::string consensus_sequences_quality_cpp(CharacterVector seqs, CharacterVector quals, int max_edit);
-RcppExport SEXP _miaoseq_consensus_sequences_quality_cpp(SEXP seqsSEXP, SEXP qualsSEXP, SEXP max_editSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< CharacterVector >::type seqs(seqsSEXP);
-    Rcpp::traits::input_parameter< CharacterVector >::type quals(qualsSEXP);
-    Rcpp::traits::input_parameter< int >::type max_edit(max_editSEXP);
-    rcpp_result_gen = Rcpp::wrap(consensus_sequences_quality_cpp(seqs, quals, max_edit));
-    return rcpp_result_gen;
-END_RCPP
-}
-// assign_genes_amplicon_ref_cpp
-List assign_genes_amplicon_ref_cpp(CharacterVector seqs, CharacterVector ref_ids, CharacterVector ref_seqs, int max_edit, int n_core);
-RcppExport SEXP _miaoseq_assign_genes_amplicon_ref_cpp(SEXP seqsSEXP, SEXP ref_idsSEXP, SEXP ref_seqsSEXP, SEXP max_editSEXP, SEXP n_coreSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< CharacterVector >::type seqs(seqsSEXP);
-    Rcpp::traits::input_parameter< CharacterVector >::type ref_ids(ref_idsSEXP);
-    Rcpp::traits::input_parameter< CharacterVector >::type ref_seqs(ref_seqsSEXP);
-    Rcpp::traits::input_parameter< int >::type max_edit(max_editSEXP);
-    Rcpp::traits::input_parameter< int >::type n_core(n_coreSEXP);
-    rcpp_result_gen = Rcpp::wrap(assign_genes_amplicon_ref_cpp(seqs, ref_ids, ref_seqs, max_edit, n_core));
-    return rcpp_result_gen;
-END_RCPP
-}
-// cluster_consensus_gene_cpp
-DataFrame cluster_consensus_gene_cpp(CharacterVector seqs, std::string sample_id, std::string gene_id, std::string method, int min_cluster_reads, int max_clusters, int max_edit, Nullable<CharacterVector> quals, std::string consensus_backend);
-RcppExport SEXP _miaoseq_cluster_consensus_gene_cpp(SEXP seqsSEXP, SEXP sample_idSEXP, SEXP gene_idSEXP, SEXP methodSEXP, SEXP min_cluster_readsSEXP, SEXP max_clustersSEXP, SEXP max_editSEXP, SEXP qualsSEXP, SEXP consensus_backendSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< CharacterVector >::type seqs(seqsSEXP);
-    Rcpp::traits::input_parameter< std::string >::type sample_id(sample_idSEXP);
-    Rcpp::traits::input_parameter< std::string >::type gene_id(gene_idSEXP);
-    Rcpp::traits::input_parameter< std::string >::type method(methodSEXP);
-    Rcpp::traits::input_parameter< int >::type min_cluster_reads(min_cluster_readsSEXP);
-    Rcpp::traits::input_parameter< int >::type max_clusters(max_clustersSEXP);
-    Rcpp::traits::input_parameter< int >::type max_edit(max_editSEXP);
-    Rcpp::traits::input_parameter< Nullable<CharacterVector> >::type quals(qualsSEXP);
-    Rcpp::traits::input_parameter< std::string >::type consensus_backend(consensus_backendSEXP);
-    rcpp_result_gen = Rcpp::wrap(cluster_consensus_gene_cpp(seqs, sample_id, gene_id, method, min_cluster_reads, max_clusters, max_edit, quals, consensus_backend));
-    return rcpp_result_gen;
-END_RCPP
-}
 // bucket_fastq_assignments_cpp
 List bucket_fastq_assignments_cpp(CharacterVector fastq_files, CharacterVector read_ids, CharacterVector sample_ids, CharacterVector target_samples);
 RcppExport SEXP _miaoseq_bucket_fastq_assignments_cpp(SEXP fastq_filesSEXP, SEXP read_idsSEXP, SEXP sample_idsSEXP, SEXP target_samplesSEXP) {
@@ -308,8 +249,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // editcall_process_reads_cpp
-List editcall_process_reads_cpp(CharacterVector sample_id, CharacterVector index_pair_id, CharacterVector read_id, CharacterVector gene_id, CharacterVector seqs, CharacterVector pam_gene, CharacterVector pam_target_gene, CharacterVector pam_guide_id, IntegerVector pam_cut_insert, IntegerVector pam_win_start, IntegerVector pam_win_end, CharacterVector ref_gene_id, CharacterVector ref_seq, int check_window, int anchor_bp, int max_expand, int min_span_bp, int excision_tol_bp, int n_core);
-RcppExport SEXP _miaoseq_editcall_process_reads_cpp(SEXP sample_idSEXP, SEXP index_pair_idSEXP, SEXP read_idSEXP, SEXP gene_idSEXP, SEXP seqsSEXP, SEXP pam_geneSEXP, SEXP pam_target_geneSEXP, SEXP pam_guide_idSEXP, SEXP pam_cut_insertSEXP, SEXP pam_win_startSEXP, SEXP pam_win_endSEXP, SEXP ref_gene_idSEXP, SEXP ref_seqSEXP, SEXP check_windowSEXP, SEXP anchor_bpSEXP, SEXP max_expandSEXP, SEXP min_span_bpSEXP, SEXP excision_tol_bpSEXP, SEXP n_coreSEXP) {
+List editcall_process_reads_cpp(CharacterVector sample_id, CharacterVector index_pair_id, CharacterVector read_id, CharacterVector gene_id, CharacterVector seqs, CharacterVector pam_gene, CharacterVector pam_target_gene, CharacterVector pam_guide_id, IntegerVector pam_cut_amplicon, IntegerVector pam_win_start, IntegerVector pam_win_end, CharacterVector ref_gene_id, CharacterVector ref_seq, int check_window, int anchor_bp, int max_expand, int min_span_bp, int excision_tol_bp, int n_core);
+RcppExport SEXP _miaoseq_editcall_process_reads_cpp(SEXP sample_idSEXP, SEXP index_pair_idSEXP, SEXP read_idSEXP, SEXP gene_idSEXP, SEXP seqsSEXP, SEXP pam_geneSEXP, SEXP pam_target_geneSEXP, SEXP pam_guide_idSEXP, SEXP pam_cut_ampliconSEXP, SEXP pam_win_startSEXP, SEXP pam_win_endSEXP, SEXP ref_gene_idSEXP, SEXP ref_seqSEXP, SEXP check_windowSEXP, SEXP anchor_bpSEXP, SEXP max_expandSEXP, SEXP min_span_bpSEXP, SEXP excision_tol_bpSEXP, SEXP n_coreSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -321,7 +262,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< CharacterVector >::type pam_gene(pam_geneSEXP);
     Rcpp::traits::input_parameter< CharacterVector >::type pam_target_gene(pam_target_geneSEXP);
     Rcpp::traits::input_parameter< CharacterVector >::type pam_guide_id(pam_guide_idSEXP);
-    Rcpp::traits::input_parameter< IntegerVector >::type pam_cut_insert(pam_cut_insertSEXP);
+    Rcpp::traits::input_parameter< IntegerVector >::type pam_cut_amplicon(pam_cut_ampliconSEXP);
     Rcpp::traits::input_parameter< IntegerVector >::type pam_win_start(pam_win_startSEXP);
     Rcpp::traits::input_parameter< IntegerVector >::type pam_win_end(pam_win_endSEXP);
     Rcpp::traits::input_parameter< CharacterVector >::type ref_gene_id(ref_gene_idSEXP);
@@ -332,7 +273,7 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type min_span_bp(min_span_bpSEXP);
     Rcpp::traits::input_parameter< int >::type excision_tol_bp(excision_tol_bpSEXP);
     Rcpp::traits::input_parameter< int >::type n_core(n_coreSEXP);
-    rcpp_result_gen = Rcpp::wrap(editcall_process_reads_cpp(sample_id, index_pair_id, read_id, gene_id, seqs, pam_gene, pam_target_gene, pam_guide_id, pam_cut_insert, pam_win_start, pam_win_end, ref_gene_id, ref_seq, check_window, anchor_bp, max_expand, min_span_bp, excision_tol_bp, n_core));
+    rcpp_result_gen = Rcpp::wrap(editcall_process_reads_cpp(sample_id, index_pair_id, read_id, gene_id, seqs, pam_gene, pam_target_gene, pam_guide_id, pam_cut_amplicon, pam_win_start, pam_win_end, ref_gene_id, ref_seq, check_window, anchor_bp, max_expand, min_span_bp, excision_tol_bp, n_core));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -342,10 +283,6 @@ static const R_CallMethodDef CallEntries[] = {
     {"_miaoseq_find_primer_hit_cpp", (DL_FUNC) &_miaoseq_find_primer_hit_cpp, 3},
     {"_miaoseq_edlib_edit_distance_cpp", (DL_FUNC) &_miaoseq_edlib_edit_distance_cpp, 3},
     {"_miaoseq_assign_genes_primers_cpp", (DL_FUNC) &_miaoseq_assign_genes_primers_cpp, 7},
-    {"_miaoseq_consensus_sequences_cpp", (DL_FUNC) &_miaoseq_consensus_sequences_cpp, 2},
-    {"_miaoseq_consensus_sequences_quality_cpp", (DL_FUNC) &_miaoseq_consensus_sequences_quality_cpp, 3},
-    {"_miaoseq_assign_genes_amplicon_ref_cpp", (DL_FUNC) &_miaoseq_assign_genes_amplicon_ref_cpp, 5},
-    {"_miaoseq_cluster_consensus_gene_cpp", (DL_FUNC) &_miaoseq_cluster_consensus_gene_cpp, 9},
     {"_miaoseq_bucket_fastq_assignments_cpp", (DL_FUNC) &_miaoseq_bucket_fastq_assignments_cpp, 4},
     {"_miaoseq_read_fastq_seqs_cpp", (DL_FUNC) &_miaoseq_read_fastq_seqs_cpp, 1},
     {"_miaoseq_reverse_complement_seqs_cpp", (DL_FUNC) &_miaoseq_reverse_complement_seqs_cpp, 2},
