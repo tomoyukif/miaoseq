@@ -16,14 +16,19 @@
 #' @param pam_list Path to a CSV file with PAM / cut-site coordinates (no header).
 #'   Columns: (1) gene ID matching primer / amplicon names, (2) chromosome /
 #'   seqname matching `genome_fn` FASTA headers exactly, (3) PAM start (1-based),
-#'   (4) optional guide ID (required when a gene has multiple rows),
-#'   (5) optional strand `+` / `-` (Cas9 cut offset on genome: `+` → pam−3,
-#'   `-` → pam+3; missing → cut = pam start).
+#'   (4) optional strand `+` / `-` (Cas9 cut offset on genome: `+` → pam−3,
+#'   `-` → pam+3; missing → cut = pam start),
+#'   (5) optional guide ID (required when a gene has multiple rows).
+#'   A gene with a single PAM row is labelled `target_gene = gene` even if a
+#'   guide ID is present.
 #' @param genome_fn Path to the reference genome FASTA.
 #' @param amplicon_fn Path to the amplicon reference FASTA from [prepAmpliconDB()].
 #' @param primer_list Path to primer CSV (`primer_id`, `seq` with `_F` / `_R` suffixes).
 #' @param editcall_dir Output directory for edit-calling tables.
 #' @param sample_list Optional CSV mapping `index_pair_id` to plate layout (no header).
+#' @param assignments Optional demultiplex `assignments.tsv` (path or data.frame)
+#'   used to fill `index_pair_id` by `read_id`. If `NULL`, tries
+#'   `../demultiplex/assignments.tsv` next to `editcall_dir`.
 #' @param check_window Window size (bp) around the cut site for initial edit
 #'   extraction (adaptive expansion starts from this window).
 #' @param anchor_bp Consecutive identity (bp) required at each end of the edit
@@ -39,9 +44,13 @@
 #' @param min_count Minimum allele count to retain (default 5).
 #' @param fastq Source FASTQ path(s). Required unless `sample_fastq_dir` is set.
 #' @param sample_fastq_dir Optional `by_sample/*.fq.gz` directory.
-#' @param max_primer_edit Maximum edlib edit distance for primer trimming.
-#' @param n_core OpenMP threads for primer trimming.
-#' @return A data frame (`editcall_summary.csv` structure).
+#' @param max_primer_edit Maximum edlib edit distance when locating primers to
+#'   strip outer adapters. Primer sequences themselves are retained in the
+#'   aligned amplicon span.
+#' @param n_core OpenMP threads for primer-span trimming and per-read
+#'   editcall (edlib alignment + window / joint extraction).
+#' @return A data frame (`editcall_summary.csv` structure). Also writes
+#'   `run_stats.txt` with versions and window / Plan A′ parameters.
 #' @import Biostrings
 #' @import dplyr
 #' @importFrom BiocGenerics width
@@ -63,6 +72,7 @@ doEditcall <- function(gene_assign = NULL,
                        primer_list,
                        editcall_dir,
                        sample_list = NULL,
+                       assignments = NULL,
                        check_window = 10L,
                        anchor_bp = 5L,
                        max_expand = 50L,
@@ -77,7 +87,22 @@ doEditcall <- function(gene_assign = NULL,
       is.null(primer_list) || is.null(editcall_dir)) {
     stop("pam_list, genome_fn, amplicon_fn, primer_list, and editcall_dir are required.")
   }
+  editcall_dir <- .abs_path(editcall_dir[[1L]], mustWork = FALSE)
+  pam_list <- .abs_path(pam_list[[1L]], mustWork = TRUE)
+  genome_fn <- .abs_path(genome_fn[[1L]], mustWork = TRUE)
+  amplicon_fn <- .abs_path(amplicon_fn[[1L]], mustWork = TRUE)
+  primer_list <- .abs_path(primer_list[[1L]], mustWork = TRUE)
+  if (!is.null(sample_fastq_dir)) {
+    sample_fastq_dir <- .abs_path(sample_fastq_dir[[1L]], mustWork = TRUE)
+  }
+  if (!is.null(fastq)) {
+    fastq <- .abs_path(fastq, mustWork = TRUE)
+  }
+  if (is.character(gene_assign) && length(gene_assign) == 1L) {
+    gene_assign <- .abs_path(gene_assign, mustWork = TRUE)
+  }
   dir.create(editcall_dir, recursive = TRUE, showWarnings = FALSE)
+  editcall_dir <- .abs_path(editcall_dir, mustWork = TRUE)
 
   gene_assignments <- .resolve_gene_assignments_for_editcall(
     gene_assign = gene_assign,
@@ -91,9 +116,10 @@ doEditcall <- function(gene_assign = NULL,
     )
   }
   gene_assignments <- gene_assignments[
-    !is.na(gene_assignments$gene_id) &
-      gene_assignments$gene_id != "" &
-      gene_assignments$assign_status == "assigned",
+    .is_processable_gene_row(
+      gene_assignments$gene_id,
+      gene_assignments$assign_status
+    ),
     ,
     drop = FALSE
   ]
@@ -106,12 +132,31 @@ doEditcall <- function(gene_assign = NULL,
     .write_joint_editcall_outputs(
       joint_records = .empty_joint_records(),
       plan_a_read_counts = data.frame(
+        sample_id = character(),
         index_pair_id = character(),
         gene_id = character(),
         n_plan_a_reads = integer(),
         stringsAsFactors = FALSE
       ),
       editcall_dir = editcall_dir
+    )
+    .write_editcall_run_stats(
+      editcall_dir = editcall_dir,
+      pam_list = pam_list,
+      genome_fn = genome_fn,
+      amplicon_fn = amplicon_fn,
+      primer_list = primer_list,
+      check_window = check_window,
+      anchor_bp = anchor_bp,
+      max_expand = max_expand,
+      min_span_bp = min_span_bp,
+      excision_tol_bp = excision_tol_bp,
+      min_count = min_count,
+      max_primer_edit = max_primer_edit,
+      n_gene_reads = 0L,
+      n_edit_alleles = 0L,
+      n_joint_events = 0L,
+      n_core = n_core
     )
     return(empty)
   }
@@ -153,6 +198,11 @@ doEditcall <- function(gene_assign = NULL,
     sample_fastq_dir = sample_fastq_dir
   )
   gene_assignments$seq <- read_seqs[match(gene_assignments$read_id, names(read_seqs))]
+  gene_assignments$index_pair_id <- .resolve_index_pair_ids(
+    reads = gene_assignments,
+    assignments = assignments,
+    editcall_dir = editcall_dir
+  )
 
   extracted <- .reads_to_edit_records(
     reads = gene_assignments,
@@ -186,6 +236,24 @@ doEditcall <- function(gene_assign = NULL,
       plan_a_read_counts = plan_a_read_counts,
       editcall_dir = editcall_dir
     )
+    .write_editcall_run_stats(
+      editcall_dir = editcall_dir,
+      pam_list = pam_list,
+      genome_fn = genome_fn,
+      amplicon_fn = amplicon_fn,
+      primer_list = primer_list,
+      check_window = check_window,
+      anchor_bp = anchor_bp,
+      max_expand = max_expand,
+      min_span_bp = min_span_bp,
+      excision_tol_bp = excision_tol_bp,
+      min_count = min_count,
+      max_primer_edit = max_primer_edit,
+      n_gene_reads = nrow(gene_assignments),
+      n_edit_alleles = 0L,
+      n_joint_events = if (is.null(joint_records)) 0L else nrow(joint_records),
+      n_core = n_core
+    )
     return(empty)
   }
 
@@ -195,13 +263,32 @@ doEditcall <- function(gene_assign = NULL,
     plan_a_read_counts = plan_a_read_counts,
     editcall_dir = editcall_dir
   )
-  .write_editcall_outputs(
+  summary_out <- .write_editcall_outputs(
     edit_records = edit_records,
     intact_seq = meta$intact_seq,
     editcall_dir = editcall_dir,
     sample_list = sample_list,
     min_count = as.integer(min_count)
   )
+  .write_editcall_run_stats(
+    editcall_dir = editcall_dir,
+    pam_list = pam_list,
+    genome_fn = genome_fn,
+    amplicon_fn = amplicon_fn,
+    primer_list = primer_list,
+    check_window = check_window,
+    anchor_bp = anchor_bp,
+    max_expand = max_expand,
+    min_span_bp = min_span_bp,
+    excision_tol_bp = excision_tol_bp,
+    min_count = min_count,
+    max_primer_edit = max_primer_edit,
+    n_gene_reads = nrow(gene_assignments),
+    n_edit_alleles = nrow(edit_records),
+    n_joint_events = if (is.null(joint_records)) 0L else nrow(joint_records),
+    n_core = n_core
+  )
+  summary_out
 }
 
 .resolve_gene_assignments_for_editcall <- function(gene_assign, amplicon_out) {
@@ -245,7 +332,7 @@ doEditcall <- function(gene_assign = NULL,
   } else {
     assn <- gene_assignments[, c("read_id", "sample_id"), drop = FALSE]
     bucketed <- bucket_fastq_assignments_cpp(
-      fastq_files = as.character(fastq),
+      fastq_files = .abs_path(fastq, mustWork = TRUE),
       read_ids = as.character(assn$read_id),
       sample_ids = as.character(assn$sample_id),
       target_samples = as.character(sample_ids)
@@ -262,6 +349,7 @@ doEditcall <- function(gene_assign = NULL,
 
 .read_sample_reads_if_present_editcall <- function(sample_id, sample_fastq_dir) {
   if (is.null(sample_fastq_dir)) return(NULL)
+  sample_fastq_dir <- .abs_path(sample_fastq_dir[[1L]], mustWork = FALSE)
   cand <- file.path(sample_fastq_dir, paste0(sample_id, ".fq.gz"))
   if (!file.exists(cand)) {
     cand <- file.path(sample_fastq_dir, paste0(sample_id, ".fq"))
@@ -269,7 +357,7 @@ doEditcall <- function(gene_assign = NULL,
   if (!file.exists(cand)) {
     return(NULL)
   }
-  raw <- read_fastq_seqs_cpp(as.character(cand)[[1]])
+  raw <- read_fastq_seqs_cpp(.abs_path(cand, mustWork = TRUE))
   data.frame(
     read_id = as.character(raw$read_id),
     seq = as.character(raw$seq),
@@ -305,6 +393,7 @@ doEditcall <- function(gene_assign = NULL,
       edit_records = .empty_edit_records(),
       joint_records = .empty_joint_records(),
       plan_a_read_counts = data.frame(
+        sample_id = character(),
         index_pair_id = character(),
         gene_id = character(),
         n_plan_a_reads = integer(),
@@ -312,159 +401,70 @@ doEditcall <- function(gene_assign = NULL,
       )
     ))
   }
+  if (!("index_pair_id" %in% names(reads)) || all(is.na(reads$index_pair_id))) {
+    reads$index_pair_id <- reads$sample_id
+  }
 
   oriented <- reverse_complement_seqs_cpp(
     as.character(reads$seq),
     as.logical(reads$flipped)
   )
-  reads$oriented_seq <- as.character(oriented)
+  reads$insert_seq <- as.character(oriented)
 
-  cache <- new.env(parent = emptyenv())
-  edit_rows <- vector("list", 0L)
-  joint_rows <- vector("list", 0L)
-  plan_a_keys <- character()
-  n_discard_expand <- 0L
-  edit_i <- 0L
-  joint_i <- 0L
-
-  for (i in seq_len(nrow(reads))) {
-    gid <- reads$gene_id[[i]]
-    pos_idx <- which(meta$aln_pos$target == gid)
-    if (length(pos_idx) < 1L) {
-      next
-    }
-    pam_rows <- meta$aln_pos[pos_idx, , drop = FALSE]
-    insert_seq <- reads$oriented_seq[[i]]
-
-    if (!is.null(primers) && nrow(primers) > 0L && gid %in% primers$gene_id) {
-      fp <- primers$seq.f[primers$gene_id == gid]
-      rp <- primers$seq.r[primers$gene_id == gid]
+  if (!is.null(primers) && nrow(primers) > 0L) {
+    for (gid in unique(as.character(reads$gene_id))) {
+      if (!nzchar(gid) || !(gid %in% primers$gene_id)) next
+      idx <- which(reads$gene_id == gid)
+      fp <- primers$seq.f[primers$gene_id == gid][[1]]
+      rp <- primers$seq.r[primers$gene_id == gid][[1]]
       trimmed <- trim_amplicon_insert_cpp(
-        insert_seq,
+        reads$insert_seq[idx],
         f_primer = fp,
         r_primer = rp,
         max_edit = as.integer(max_primer_edit),
-        n_core = as.integer(max(1L, n_core))
+        n_core = as.integer(max(1L, n_core)),
+        include_primers = TRUE
       )
-      tseq <- as.character(trimmed$seq)[[1]]
-      if (nzchar(tseq)) {
-        insert_seq <- tseq
-      }
-    }
-
-    aln_pack <- .align_insert_to_ref(
-      insert_seq = insert_seq,
-      gid = gid,
-      meta = meta,
-      cache = cache
-    )
-    if (is.null(aln_pack)) {
-      next
-    }
-
-    local_wins <- vector("list", nrow(pam_rows))
-    names(local_wins) <- pam_rows$target_gene
-    for (j in seq_len(nrow(pam_rows))) {
-      tg <- pam_rows$target_gene[[j]]
-      local_wins[[tg]] <- .edit_seq_from_alignment(
-        aln_pack = aln_pack,
-        pos_row = pam_rows[j, , drop = FALSE],
-        target_gene = tg,
-        insert_seq = insert_seq,
-        cache = cache,
-        anchor_bp = as.integer(anchor_bp),
-        max_expand = as.integer(max_expand)
-      )
-    }
-
-    joint_events <- .classify_joint_events(
-      pam_rows = pam_rows,
-      local_wins = local_wins,
-      ref_aln = aln_pack$ref_aln,
-      query_aln = aln_pack$query_aln,
-      check_window = as.integer(check_window),
-      anchor_bp = as.integer(anchor_bp),
-      max_expand = as.integer(max_expand),
-      min_span_bp = as.integer(min_span_bp),
-      excision_tol_bp = as.integer(excision_tol_bp)
-    )
-
-    excision_guide <- character()
-    excision_allele <- list()
-    if (length(joint_events) > 0L) {
-      for (ev in joint_events) {
-        joint_i <- joint_i + 1L
-        joint_rows[[joint_i]] <- data.frame(
-          index_pair_id = reads$sample_id[[i]],
-          read_id = reads$read_id[[i]],
-          gene_id = gid,
-          guide_i = ev$guide_i,
-          guide_j = ev$guide_j,
-          target_gene_i = ev$target_gene_i,
-          target_gene_j = ev$target_gene_j,
-          event_class = ev$event_class,
-          del_span = ev$del_span,
-          expected_span = ev$expected_span,
-          stringsAsFactors = FALSE
-        )
-        if (identical(ev$event_class, "both_cut_excision") &&
-            !is.null(ev$junction)) {
-          for (tg in c(ev$target_gene_i, ev$target_gene_j)) {
-            excision_guide <- c(excision_guide, tg)
-            excision_allele[[tg]] <- ev$junction
-          }
-        }
-      }
-    }
-    excision_guide <- unique(excision_guide)
-
-    emitted_any <- FALSE
-    for (j in seq_len(nrow(pam_rows))) {
-      tg <- pam_rows$target_gene[[j]]
-      win <- NULL
-      allele_source <- "local"
-      intact <- FALSE
-      if (tg %in% excision_guide) {
-        win <- excision_allele[[tg]]
-        allele_source <- "excision"
-        intact <- FALSE
-      } else {
-        win <- local_wins[[tg]]
-        if (!is.null(win) && !is.na(win$read_seq) && nzchar(win$read_seq)) {
-          intact <- identical(win$read_seq, win$ref_seq)
-          allele_source <- "local"
-        } else {
-          win <- NULL
-        }
-      }
-      if (is.null(win)) {
-        if (!(tg %in% excision_guide)) {
-          n_discard_expand <- n_discard_expand + 1L
-        }
-        next
-      }
-      edit_i <- edit_i + 1L
-      edit_rows[[edit_i]] <- data.frame(
-        index_pair_id = reads$sample_id[[i]],
-        target_gene = tg,
-        read_seq = win$read_seq,
-        ref_seq = win$ref_seq,
-        count = 1L,
-        intact = intact,
-        allele_source = allele_source,
-        stringsAsFactors = FALSE
-      )
-      emitted_any <- TRUE
-    }
-    if (emitted_any) {
-      plan_a_keys <- c(
-        plan_a_keys,
-        paste(reads$sample_id[[i]], gid, sep = "\t")
-      )
+      tseq <- as.character(trimmed$seq)
+      ok <- !is.na(tseq) & nzchar(tseq)
+      reads$insert_seq[idx[ok]] <- tseq[ok]
     }
   }
 
-  if (n_discard_expand > 0L) {
+  pam <- meta$aln_pos
+  guide_id <- if ("guide_id" %in% names(pam)) {
+    as.character(pam$guide_id)
+  } else {
+    rep("", nrow(pam))
+  }
+  guide_id[is.na(guide_id)] <- ""
+  ref_ids <- names(meta$amplicon_seq)
+  ref_seqs <- as.character(meta$amplicon_seq)
+
+  extracted <- editcall_process_reads_cpp(
+    sample_id = as.character(reads$sample_id),
+    index_pair_id = as.character(reads$index_pair_id),
+    read_id = as.character(reads$read_id),
+    gene_id = as.character(reads$gene_id),
+    seqs = as.character(reads$insert_seq),
+    pam_gene = as.character(pam$target),
+    pam_target_gene = as.character(pam$target_gene),
+    pam_guide_id = guide_id,
+    pam_cut_insert = as.integer(pam$cut_insert),
+    pam_win_start = as.integer(pam$start),
+    pam_win_end = as.integer(pam$end),
+    ref_gene_id = as.character(ref_ids),
+    ref_seq = ref_seqs,
+    check_window = as.integer(check_window),
+    anchor_bp = as.integer(anchor_bp),
+    max_expand = as.integer(max_expand),
+    min_span_bp = as.integer(min_span_bp),
+    excision_tol_bp = as.integer(excision_tol_bp),
+    n_core = as.integer(max(1L, n_core))
+  )
+
+  n_discard_expand <- as.integer(extracted$n_discard_expand)
+  if (!is.na(n_discard_expand) && n_discard_expand > 0L) {
     message(
       "Discarded ", n_discard_expand,
       " guide-window(s) that failed adaptive edit-window anchor search ",
@@ -472,29 +472,29 @@ doEditcall <- function(gene_assign = NULL,
     )
   }
 
-  out <- if (length(edit_rows) < 1L) {
+  raw <- as.data.frame(extracted$edit_records, stringsAsFactors = FALSE)
+  out <- if (is.null(raw) || nrow(raw) < 1L) {
     .empty_edit_records()
   } else {
-    raw <- do.call("rbind", edit_rows)
-    rownames(raw) <- NULL
     agg <- aggregate(
-      count ~ index_pair_id + target_gene + read_seq + ref_seq + intact + allele_source,
+      count ~ sample_id + index_pair_id + target_gene + read_seq + ref_seq + intact + allele_source,
       data = raw,
       FUN = sum
     )
-    agg[order(agg$index_pair_id, agg$target_gene, -agg$count), , drop = FALSE]
+    agg[order(agg$sample_id, agg$index_pair_id, agg$target_gene, -agg$count), , drop = FALSE]
   }
 
-  joint_out <- if (length(joint_rows) < 1L) {
+  jraw <- as.data.frame(extracted$joint_records, stringsAsFactors = FALSE)
+  joint_out <- if (is.null(jraw) || nrow(jraw) < 1L) {
     .empty_joint_records()
   } else {
-    jraw <- do.call("rbind", joint_rows)
-    rownames(jraw) <- NULL
     jraw
   }
+  plan_a_keys <- as.character(extracted$plan_a_keys)
 
   plan_a_read_counts <- if (length(plan_a_keys) < 1L) {
     data.frame(
+      sample_id = character(),
       index_pair_id = character(),
       gene_id = character(),
       n_plan_a_reads = integer(),
@@ -504,8 +504,9 @@ doEditcall <- function(gene_assign = NULL,
     tab <- table(plan_a_keys)
     parts <- strsplit(names(tab), "\t", fixed = TRUE)
     data.frame(
-      index_pair_id = vapply(parts, `[[`, character(1), 1L),
-      gene_id = vapply(parts, `[[`, character(1), 2L),
+      sample_id = vapply(parts, `[[`, character(1), 1L),
+      index_pair_id = vapply(parts, `[[`, character(1), 2L),
+      gene_id = vapply(parts, `[[`, character(1), 3L),
       n_plan_a_reads = as.integer(tab),
       stringsAsFactors = FALSE
     )
@@ -520,6 +521,7 @@ doEditcall <- function(gene_assign = NULL,
 
 .empty_edit_records <- function() {
   data.frame(
+    sample_id = character(),
     index_pair_id = character(),
     target_gene = character(),
     read_seq = character(),
@@ -533,6 +535,7 @@ doEditcall <- function(gene_assign = NULL,
 
 .empty_joint_records <- function() {
   data.frame(
+    sample_id = character(),
     index_pair_id = character(),
     read_id = character(),
     gene_id = character(),
@@ -559,20 +562,21 @@ doEditcall <- function(gene_assign = NULL,
     return(get(cache_key, envir = cache, inherits = FALSE))
   }
 
-  pos0 <- meta$aln_pos[meta$aln_pos$target == gid, , drop = FALSE][1, , drop = FALSE]
-  amp <- as.character(meta$amplicon_seq[[gid]])
-  f_len <- as.integer(pos0$f_primer_len)
-  r_len <- as.integer(pos0$r_primer_len)
-  ref_insert <- substr(amp, f_len + 1L, nchar(amp) - r_len)
-  if (!nzchar(ref_insert)) {
+  # Align to the full amplicon (primers included) so PAM windows near primer
+  # ends are not clipped away.
+  ref_amp <- as.character(meta$amplicon_seq[[gid]])
+  if (!nzchar(ref_amp)) {
     return(NULL)
   }
 
-  aln <- pairwiseAlignment(insert_seq, ref_insert, type = "global")
+  aln <- edlib_nw_align_cpp(insert_seq, ref_amp)
+  if (!isTRUE(aln$ok)) {
+    return(NULL)
+  }
   pack <- list(
-    ref_aln = as.character(aligned(pwalign::subject(aln))),
-    query_aln = as.character(aligned(pwalign::pattern(aln))),
-    ref_insert = ref_insert
+    ref_aln = aln$ref_aln,
+    query_aln = aln$query_aln,
+    ref_insert = ref_amp
   )
   assign(cache_key, pack, envir = cache, inherits = FALSE)
   pack
@@ -714,6 +718,74 @@ doEditcall <- function(gene_assign = NULL,
   events
 }
 
+.resolve_excision_plan_a_alleles <- function(joint_events) {
+  allele <- list()
+  n_hit <- list()
+  if (length(joint_events) < 1L) {
+    return(allele)
+  }
+  for (ev in joint_events) {
+    if (!identical(ev$event_class, "both_cut_excision") || is.null(ev$junction)) {
+      next
+    }
+    for (tg in c(ev$target_gene_i, ev$target_gene_j)) {
+      n <- if (is.null(n_hit[[tg]])) 0L else as.integer(n_hit[[tg]])
+      n_hit[[tg]] <- n + 1L
+      if (n >= 1L) {
+        allele[[tg]] <- list(read_seq = "---", ref_seq = "---")
+      } else {
+        allele[[tg]] <- ev$junction
+      }
+    }
+  }
+  allele
+}
+
+.write_editcall_run_stats <- function(editcall_dir,
+                                      pam_list,
+                                      genome_fn,
+                                      amplicon_fn,
+                                      primer_list,
+                                      check_window,
+                                      anchor_bp,
+                                      max_expand,
+                                      min_span_bp,
+                                      excision_tol_bp,
+                                      min_count,
+                                      max_primer_edit,
+                                      n_gene_reads,
+                                      n_edit_alleles,
+                                      n_joint_events,
+                                      n_core = 1L) {
+  pkg_ver <- tryCatch(
+    as.character(utils::packageVersion("miaoseq")),
+    error = function(e) NA_character_
+  )
+  write(
+    paste0(
+      "r_version=", R.version.string, "\n",
+      "miaoseq_version=", pkg_ver, "\n",
+      "pam_list=", pam_list, "\n",
+      "genome_fn=", genome_fn, "\n",
+      "amplicon_fn=", amplicon_fn, "\n",
+      "primer_list=", primer_list, "\n",
+      "check_window=", check_window, "\n",
+      "anchor_bp=", anchor_bp, "\n",
+      "max_expand=", max_expand, "\n",
+      "min_span_bp=", min_span_bp, "\n",
+      "excision_tol_bp=", excision_tol_bp, "\n",
+      "min_count=", min_count, "\n",
+      "max_primer_edit=", max_primer_edit, "\n",
+      "n_core=", n_core, "\n",
+      "n_gene_reads=", n_gene_reads, "\n",
+      "n_edit_alleles=", n_edit_alleles, "\n",
+      "n_joint_events=", n_joint_events, "\n"
+    ),
+    file = file.path(editcall_dir, "run_stats.txt")
+  )
+  invisible(TRUE)
+}
+
 .filter_abnormal_edit_records <- function(edit_records, check_window,
                                           max_expand = 50L) {
   if (is.null(edit_records) || nrow(edit_records) < 1L) {
@@ -819,28 +891,28 @@ doEditcall <- function(gene_assign = NULL,
     f_len <- as.integer(BiocGenerics::width(f_primers[gene]))
     r_len <- as.integer(BiocGenerics::width(r_primers[gene]))
     amp_len <- as.integer(BiocGenerics::width(amplicon_seq[gene]))
-    cut_insert <- as.integer(amp_coord - f_len)
-    insert_len <- amp_len - f_len - r_len
-    if (is.na(cut_insert) || cut_insert < 1L || cut_insert > insert_len) {
+    # Cut / window coordinates are on the full amplicon (primers included).
+    cut_amp <- as.integer(amp_coord)
+    if (is.na(cut_amp) || cut_amp < 1L || cut_amp > amp_len) {
       stop(
-        "Cut for ", tg, " maps outside ref_insert (insert coord=",
-        cut_insert, ", insert_len=", insert_len, ").",
+        "Cut for ", tg, " maps outside amplicon (amp coord=",
+        cut_amp, ", amp_len=", amp_len, ").",
         call. = FALSE
       )
     }
 
-    win_start <- cut_insert - as.integer(check_window)
-    win_end <- cut_insert + as.integer(check_window)
+    win_start <- cut_amp - as.integer(check_window)
+    win_end <- cut_amp + as.integer(check_window)
     rows[[i]] <- data.frame(
       start = win_start,
       end = win_end,
-      cut_insert = cut_insert,
+      cut_insert = cut_amp,
       cut_genome = cut_g,
       pam_start = pam$pam_start[[i]],
       strand = pam$strand[[i]],
       f_primer_len = f_len,
       r_primer_len = r_len,
-      dist_to_end = insert_len - win_end,
+      dist_to_end = amp_len - win_end,
       target_len = win_end - win_start,
       target = gene,
       guide_id = pam$guide_id[[i]],
@@ -886,53 +958,53 @@ doEditcall <- function(gene_assign = NULL,
     stop("pam_list column 3 (pam_start) must be integer.")
   }
 
-  guide_id <- if (ncol(edit_site) >= 4L) {
+  strand <- if (ncol(edit_site) >= 4L) {
     as.character(edit_site$V4)
-  } else {
-    rep(NA_character_, nrow(edit_site))
-  }
-  guide_id[is.na(guide_id) | !nzchar(guide_id)] <- NA_character_
-
-  strand <- if (ncol(edit_site) >= 5L) {
-    as.character(edit_site$V5)
   } else {
     rep(NA_character_, nrow(edit_site))
   }
   strand[is.na(strand) | !nzchar(strand)] <- NA_character_
 
+  guide_id <- if (ncol(edit_site) >= 5L) {
+    as.character(edit_site$V5)
+  } else {
+    rep(NA_character_, nrow(edit_site))
+  }
+  guide_id[is.na(guide_id) | !nzchar(guide_id)] <- NA_character_
+
   bad_strand <- !is.na(strand) & !(strand %in% c("+", "-"))
   if (any(bad_strand)) {
     stop(
-      "pam_list column 5 must be '+', '-', or empty; got: ",
+      "pam_list column 4 must be '+', '-', or empty; got: ",
       paste(unique(strand[bad_strand]), collapse = ", "),
       call. = FALSE
     )
   }
 
+  target_gene <- gene
   for (g in unique(gene)) {
     idx <- which(gene == g)
-    if (length(idx) > 1L) {
-      gids <- guide_id[idx]
-      if (any(is.na(gids))) {
-        stop(
-          "pam_list gene ", g, " has multiple rows; guide ID (column 4) ",
-          "is required for each row.",
-          call. = FALSE
-        )
-      }
-      if (any(duplicated(gids))) {
-        stop(
-          "pam_list gene ", g, " has duplicated guide ID(s): ",
-          paste(unique(gids[duplicated(gids)]), collapse = ", "),
-          call. = FALSE
-        )
-      }
+    if (length(idx) == 1L) {
+      target_gene[idx] <- g
+      next
     }
+    gids <- guide_id[idx]
+    if (any(is.na(gids))) {
+      stop(
+        "pam_list gene ", g, " has multiple rows; guide ID (column 5) ",
+        "is required for each row.",
+        call. = FALSE
+      )
+    }
+    if (any(duplicated(gids))) {
+      stop(
+        "pam_list gene ", g, " has duplicated guide ID(s): ",
+        paste(unique(gids[duplicated(gids)]), collapse = ", "),
+        call. = FALSE
+      )
+    }
+    target_gene[idx] <- paste(g, gids, sep = "_")
   }
-
-  target_gene <- gene
-  has_guide <- !is.na(guide_id)
-  target_gene[has_guide] <- paste(gene[has_guide], guide_id[has_guide], sep = "_")
   if (any(duplicated(target_gene))) {
     stop(
       "Duplicate target_gene after pam_list parse: ",
@@ -957,6 +1029,50 @@ doEditcall <- function(gene_assign = NULL,
     target_gene = target_gene,
     stringsAsFactors = FALSE
   )
+}
+
+.resolve_index_pair_ids <- function(reads, assignments, editcall_dir) {
+  n <- nrow(reads)
+  out <- if ("index_pair_id" %in% names(reads)) {
+    as.character(reads$index_pair_id)
+  } else {
+    rep(NA_character_, n)
+  }
+
+  assn <- .load_assignments_table(assignments, editcall_dir)
+  if (!is.null(assn) && nrow(assn) > 0L &&
+      all(c("read_id", "index_pair_id") %in% names(assn))) {
+    hit <- match(as.character(reads$read_id), as.character(assn$read_id))
+    from_assn <- as.character(assn$index_pair_id)[hit]
+    fill <- is.na(out) | !nzchar(out)
+    out[fill] <- from_assn[fill]
+  }
+
+  miss <- is.na(out) | !nzchar(out)
+  if (any(miss)) {
+    out[miss] <- as.character(reads$sample_id[miss])
+  }
+  out
+}
+
+.load_assignments_table <- function(assignments, editcall_dir) {
+  if (is.data.frame(assignments)) {
+    return(assignments)
+  }
+  path <- NULL
+  if (is.character(assignments) && length(assignments) == 1L &&
+      nzchar(assignments) && file.exists(assignments)) {
+    path <- assignments
+  } else if (!is.null(editcall_dir)) {
+    cand <- file.path(dirname(editcall_dir), "demultiplex", "assignments.tsv")
+    if (file.exists(cand)) {
+      path <- cand
+    }
+  }
+  if (is.null(path)) {
+    return(NULL)
+  }
+  utils::read.delim(path, stringsAsFactors = FALSE)
 }
 
 .map_amplicon_to_genome <- function(amp, chr_seq, gene, seqname) {
@@ -1044,6 +1160,7 @@ doEditcall <- function(gene_assign = NULL,
 
 .build_joint_editcall_summary <- function(joint_records, plan_a_read_counts) {
   empty <- data.frame(
+    sample_id = character(),
     index_pair_id = character(),
     gene_id = character(),
     guide_i = character(),
@@ -1064,6 +1181,7 @@ doEditcall <- function(gene_assign = NULL,
 
   if (is.null(plan_a_read_counts)) {
     plan_a_read_counts <- data.frame(
+      sample_id = character(),
       index_pair_id = character(),
       gene_id = character(),
       n_plan_a_reads = integer(),
@@ -1071,7 +1189,11 @@ doEditcall <- function(gene_assign = NULL,
     )
   }
 
-  keys <- unique(joint_records[, c("index_pair_id", "gene_id", "guide_i", "guide_j")])
+  key_cols <- intersect(
+    c("sample_id", "index_pair_id", "gene_id", "guide_i", "guide_j"),
+    names(joint_records)
+  )
+  keys <- unique(joint_records[, key_cols, drop = FALSE])
   out <- lapply(seq_len(nrow(keys)), function(i) {
     key <- keys[i, , drop = FALSE]
     sub <- joint_records[
@@ -1093,6 +1215,7 @@ doEditcall <- function(gene_assign = NULL,
     }
     n_ex <- sum(sub$event_class == "both_cut_excision")
     data.frame(
+      sample_id = if ("sample_id" %in% names(key)) key$sample_id else key$index_pair_id,
       index_pair_id = key$index_pair_id,
       gene_id = key$gene_id,
       guide_i = key$guide_i,
@@ -1255,11 +1378,13 @@ doEditcall <- function(gene_assign = NULL,
       ij_df <- i_df[j, , drop = FALSE]
       top_count <- max(ij_df$count)
       top_df <- ij_df[ij_df$count > top_count / 2, , drop = FALSE]
-      top_df$vs_intact_ratio <- 0
-      top_df$intact_count <- 0
-      if (any(top_df$intact)) {
-        top_df$intact_count <- top_df$count[top_df$intact]
+      # Scalar intact support among top alleles (may be >1 intact row).
+      intact_count <- if (any(top_df$intact)) {
+        as.integer(sum(top_df$count[top_df$intact]))
+      } else {
+        0L
       }
+      top_df$intact_count <- intact_count
       top_df$vs_intact_ratio <- top_df$count / (top_df$count + top_df$intact_count)
       top_df$vs_intact_ratio[top_df$intact] <- NA
       top_df
@@ -1287,7 +1412,10 @@ doEditcall <- function(gene_assign = NULL,
     editcall_out <- left_join(editcall_out, total_reads_df, by = "index_pair_id")
     gene_cols <- setdiff(
       names(editcall_out),
-      c("index_pair_id", "data_type", "sample_name", "plate_id", "row_id", "col_id", "total_reads")
+      c(
+        "index_pair_id", "sample_id", "data_type", "sample_name",
+        "plate_id", "row_id", "col_id", "total_reads"
+      )
     )
     editcall_out <- editcall_out[, c(
       "index_pair_id", "data_type", gene_cols,

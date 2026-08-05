@@ -13,6 +13,7 @@ doEditcall(
   primer_list,
   editcall_dir,
   sample_list = NULL,
+  assignments = NULL,
   check_window = 10L,
   anchor_bp = 5L,
   max_expand = 50L,
@@ -36,9 +37,11 @@ unless recoverable from \code{amplicon_out}.}
 \item{pam_list}{Path to a CSV file with PAM / cut-site coordinates (no header).
 Columns: (1) gene ID matching primer / amplicon names, (2) chromosome /
 seqname matching \code{genome_fn} FASTA headers exactly, (3) PAM start (1-based),
-(4) optional guide ID (required when a gene has multiple rows),
-(5) optional strand \code{+} / \code{-} (Cas9 cut offset on genome: \code{+} → pam−3,
-\code{-} → pam+3; missing → cut = pam start).}
+(4) optional strand \code{+} / \code{-} (Cas9 cut offset on genome: \code{+} → pam−3,
+\code{-} → pam+3; missing → cut = pam start),
+(5) optional guide ID (required when a gene has multiple rows).
+A gene with a single PAM row is labelled \code{target_gene = gene} even if a
+guide ID is present.}
 
 \item{genome_fn}{Path to the reference genome FASTA.}
 
@@ -49,6 +52,10 @@ seqname matching \code{genome_fn} FASTA headers exactly, (3) PAM start (1-based)
 \item{editcall_dir}{Output directory for edit-calling tables.}
 
 \item{sample_list}{Optional CSV mapping \code{index_pair_id} to plate layout (no header).}
+
+\item{assignments}{Optional demultiplex \code{assignments.tsv} (path or data.frame)
+used to fill \code{index_pair_id} by \code{read_id}. If \code{NULL}, tries
+\verb{../demultiplex/assignments.tsv} next to \code{editcall_dir}.}
 
 \item{check_window}{Window size (bp) around the cut site for initial edit
 extraction (adaptive expansion starts from this window).}
@@ -64,7 +71,7 @@ within this limit are discarded.}
 \item{min_span_bp}{Minimum expected cut–cut span (bp) required before classifying
 a dual-guide \code{both_cut_excision} event (Plan A′). Default 30.}
 
-\item{excision_tol_bp}{Absolute tolerance (bp) for \code{|del_span - expected|} when
+\item{excision_tol_bp}{Absolute tolerance (bp) for \verb{|del_span - expected|} when
 calling \code{both_cut_excision}. Default 20.}
 
 \item{min_count}{Minimum allele count to retain (default 5).}
@@ -73,12 +80,15 @@ calling \code{both_cut_excision}. Default 20.}
 
 \item{sample_fastq_dir}{Optional \verb{by_sample/*.fq.gz} directory.}
 
-\item{max_primer_edit}{Maximum edlib edit distance for primer trimming.}
+\item{max_primer_edit}{Maximum edlib edit distance when locating primers to
+strip outer adapters. Primer sequences themselves are retained in the
+aligned amplicon span.}
 
-\item{n_core}{OpenMP threads for primer trimming.}
+\item{n_core}{OpenMP threads for primer-span trimming and per-read
+editcall (edlib alignment + window / joint extraction).}
 }
 \value{
-A data frame (\code{editcall_summary.csv} structure).
+A data frame (\code{editcall_summary.csv} structure). Also writes \code{run_stats.txt} with versions and window / Plan A′ parameters.
 }
 \description{
 Consumes \code{\link[=doAssignGenes]{doAssignGenes()}} output (\code{gene_assign}) and per-read FASTQ

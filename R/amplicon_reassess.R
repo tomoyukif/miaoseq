@@ -33,7 +33,7 @@
 #'   reassignment diagnostics (Q2). Same identity derivation as above.
 #' @param min_identity Optional identity threshold in \eqn{[0,1]} for
 #'   `vsearch` / `blastn` / `mmseqs`. If `NULL`, derived from edit distance and
-#'   median consensus length via [`.vsearch_id_threshold()`].
+#'   median consensus length via [`.vsearch_id_from_edit()`].
 #' @param layers Unassigned layers to include. Currently `"U1"` only.
 #' @param primer_list Optional primers for insert trim when reconstructing U1
 #'   sequences from `gene_assign`.
@@ -257,7 +257,7 @@ doReassessAssemblies <- function(
   id_merge <- if (!is.null(min_identity)) {
     as.numeric(min_identity)
   } else {
-    .vsearch_id_threshold(
+    .vsearch_id_from_edit(
       as.character(consensus$seq),
       as.integer(consensus_merge_max_edit)
     )
@@ -265,7 +265,7 @@ doReassessAssemblies <- function(
   id_assign <- if (!is.null(min_identity)) {
     as.numeric(min_identity)
   } else {
-    .vsearch_id_threshold(
+    .vsearch_id_from_edit(
       as.character(consensus$seq),
       as.integer(read_assign_max_edit)
     )
@@ -1088,9 +1088,7 @@ doReassessAssemblies <- function(
   if (is.null(gene_assign) || nrow(consensus) < 1L) return(empty)
   ga <- gene_assign[
     gene_assign$sample_id == sample_id &
-      !is.na(gene_assign$gene_id) &
-      gene_assign$gene_id != "" &
-      gene_assign$assign_status == "assigned",
+      .is_processable_gene_row(gene_assign$gene_id, gene_assign$assign_status),
     ,
     drop = FALSE
   ]

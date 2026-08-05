@@ -5,8 +5,10 @@
 #' Assign reads to genes (Step 2a)
 #'
 #' Reads demultiplexed FASTQ records, assigns each read to a target gene by
-#' primer matching, applies orientation normalization, and optionally filters
-#' by **trimmed insert** length against `amplicon_fn` widths.
+#' primer matching, applies orientation normalization, and optionally labels
+#' **trimmed-insert** length outliers against `amplicon_fn` (amplicon width
+#' minus primer lengths). Outliers are kept as `assign_status = "length_outlier"`
+#' and are not dropped.
 #'
 #' @param assignments Path to `assignments.tsv` or a data.frame with at least
 #'   `read_id` and `sample_id`.
@@ -18,14 +20,18 @@
 #' @param primer_list Optional CSV of primer sequences (`primer_id`, `seq`).
 #'   Required for gene assignment and for expected-length filtering.
 #' @param amplicon_fn Optional amplicon reference FASTA used only for
-#'   expected-length filtering (sequence widths). Gene assignment by amplicon
-#'   NW fallback has been removed.
+#'   expected-length labeling (sequence widths minus primer lengths). Gene
+#'   assignment by amplicon NW fallback has been removed.
 #' @param max_primer_edit Maximum edit distance for primer matching / trim.
 #' @param end_window Window size (bp) at read ends for primer search.
 #' @param length_tolerance Relative length tolerance when `amplicon_fn` is set
-#'   (compared to trimmed insert length).
+#'   (trimmed insert vs amplicon width − F/R primer). Outliers are labeled
+#'   `length_outlier`, not removed.
 #' @param samples Optional subset of `sample_id` to process.
 #' @param n_core Number of OpenMP threads for C++ assignment/trimming.
+#' @param store_sequences If `FALSE`, write empty `oriented_seq` /
+#'   `oriented_qual` (smaller TSV; Editcall can reload FASTQ). Assemble /
+#'   Reassess need `TRUE` (default) when reading assignments from disk.
 #' @param overwrite If `FALSE`, stop when `out_dir` is non-empty.
 #' @param stats_unassign If `TRUE`, write `stats_unassigned.tsv`.
 #'
@@ -51,15 +57,34 @@ doAssignGenes <- function(
   length_tolerance = 0.25,
   samples = NULL,
   n_core = 1L,
+  store_sequences = TRUE,
   overwrite = FALSE,
   stats_unassign = FALSE
 ) {
+  out_dir <- .abs_path(out_dir[[1L]], mustWork = FALSE)
+  if (is.character(assignments) && length(assignments) == 1L) {
+    assignments <- .abs_path(assignments, mustWork = TRUE)
+  }
+  if (!is.null(sample_fastq_dir)) {
+    sample_fastq_dir <- .abs_path(sample_fastq_dir[[1L]], mustWork = TRUE)
+  }
+  if (!is.null(fastq)) {
+    fastq <- .abs_path(fastq, mustWork = TRUE)
+  }
+  if (!is.null(primer_list)) {
+    primer_list <- .abs_path(primer_list[[1L]], mustWork = TRUE)
+  }
+  if (!is.null(amplicon_fn)) {
+    amplicon_fn <- .abs_path(amplicon_fn[[1L]], mustWork = TRUE)
+  }
+
   if (!overwrite && dir.exists(out_dir) && length(list.files(out_dir)) > 0L) {
     stop("out_dir already exists and is not empty. Set overwrite = TRUE to overwrite.")
   }
   if (!dir.exists(out_dir)) {
     dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   }
+  out_dir <- .abs_path(out_dir, mustWork = TRUE)
 
   assn <- .as_assignment_df(assignments)
   if (!all(c("read_id", "sample_id") %in% names(assn))) {
@@ -87,13 +112,17 @@ doAssignGenes <- function(
   primers <- if (!is.null(primer_list)) .parse_primer_pairs(primer_list) else NULL
   expected_lengths <- if (!is.null(amplicon_fn)) {
     amplicon_refs <- Biostrings::readDNAStringSet(amplicon_fn)
-    stats::setNames(as.integer(BiocGenerics::width(amplicon_refs)), names(amplicon_refs))
+    amp_w <- stats::setNames(
+      as.integer(BiocGenerics::width(amplicon_refs)),
+      names(amplicon_refs)
+    )
+    .expected_insert_lengths(amp_w, primers)
   } else {
     NULL
   }
   if (!is.null(expected_lengths) && is.null(primers)) {
     stop(
-      "amplicon_fn expected-length filtering requires primer_list so that ",
+      "amplicon_fn expected-length labeling requires primer_list so that ",
       "trimmed insert lengths can be measured."
     )
   }
@@ -134,7 +163,7 @@ doAssignGenes <- function(
     reads$oriented_seq <- oriented$seq
     reads$oriented_qual <- oriented$qual
     if (!is.null(expected_lengths)) {
-      reads <- .filter_reads_by_trimmed_insert_length(
+      reads <- .label_length_outliers(
         reads = reads,
         primers = primers,
         expected_lengths = expected_lengths,
@@ -142,6 +171,10 @@ doAssignGenes <- function(
         max_primer_edit = max_primer_edit,
         n_core = n_core
       )
+    }
+    if (!isTRUE(store_sequences)) {
+      reads$oriented_seq <- rep("", nrow(reads))
+      reads$oriented_qual <- rep("", nrow(reads))
     }
     parts[[i]] <- reads[, c(
       "read_id", "sample_id", "gene_id",
@@ -290,8 +323,8 @@ doAssembleAmplicons <- function(
       summary_rows[[i]] <- .make_summary_row(sid, 0L, 0L, 0L, "empty_sample")
       next
     }
-    reads <- reads[!is.na(reads$gene_id) & reads$gene_id != "" &
-      reads$assign_status == "assigned", , drop = FALSE]
+    reads <- reads[.is_processable_gene_row(reads$gene_id, reads$assign_status),
+                   , drop = FALSE]
     gene_ids <- unique(reads$gene_id)
     if (length(gene_ids) < 1L) {
       .write_sample_skip(sid_dir, sid, n_in, 0L, "no_gene_assigned")
@@ -891,12 +924,13 @@ doAmpliconResolve <- doAssembleAmplicons
 #' @keywords internal
 .read_sample_reads_if_present <- function(sample_id, sample_fastq_dir) {
   if (is.null(sample_fastq_dir)) return(NULL)
+  sample_fastq_dir <- .abs_path(sample_fastq_dir[[1L]], mustWork = FALSE)
   cand <- file.path(sample_fastq_dir, paste0(sample_id, ".fq.gz"))
   if (!file.exists(cand)) {
     cand <- file.path(sample_fastq_dir, paste0(sample_id, ".fq"))
   }
   if (file.exists(cand)) {
-    return(.read_all_reads_from_fastq(cand))
+    return(.read_all_reads_from_fastq(.abs_path(cand, mustWork = TRUE)))
   }
   NULL
 }
@@ -904,7 +938,7 @@ doAmpliconResolve <- doAssembleAmplicons
 #' @keywords internal
 .bucket_reads_from_fastq <- function(fastq, assignments, target_samples) {
   raw <- bucket_fastq_assignments_cpp(
-    fastq_files = as.character(fastq),
+    fastq_files = .abs_path(fastq, mustWork = TRUE),
     read_ids = as.character(assignments$read_id),
     sample_ids = as.character(assignments$sample_id),
     target_samples = as.character(target_samples)
@@ -924,7 +958,7 @@ doAmpliconResolve <- doAssembleAmplicons
 
 #' @keywords internal
 .read_all_reads_from_fastq <- function(fastq) {
-  raw <- read_fastq_seqs_cpp(as.character(fastq)[[1]])
+  raw <- read_fastq_seqs_cpp(.abs_path(fastq[[1]], mustWork = TRUE))
   data.frame(
     read_id = as.character(raw$read_id),
     seq = as.character(raw$seq),
@@ -964,48 +998,74 @@ doAmpliconResolve <- doAssembleAmplicons
 }
 
 #' @keywords internal
-.filter_reads_by_trimmed_insert_length <- function(reads,
-                                                    primers,
-                                                    expected_lengths,
-                                                    length_tolerance,
-                                                    max_primer_edit,
-                                                    n_core = 1L) {
-  if (nrow(reads) < 1L) return(reads)
-  keep <- logical(nrow(reads))
-  for (i in seq_len(nrow(reads))) {
-    gid <- reads$gene_id[[i]]
-    status <- reads$assign_status[[i]]
-    if (is.na(gid) || !nzchar(gid) || !identical(status, "assigned")) {
-      keep[[i]] <- TRUE
-      next
-    }
-    exp_len <- expected_lengths[[gid]]
-    if (is.null(exp_len) || is.na(exp_len) || exp_len < 1L) {
-      keep[[i]] <- TRUE
-      next
-    }
+.processable_assign_statuses <- function() {
+  c("assigned", "length_outlier")
+}
+
+#' @keywords internal
+.is_processable_gene_row <- function(gene_id, assign_status) {
+  !is.na(gene_id) & nzchar(as.character(gene_id)) &
+    as.character(assign_status) %in% .processable_assign_statuses()
+}
+
+#' @keywords internal
+.expected_insert_lengths <- function(amplicon_widths, primers) {
+  genes <- names(amplicon_widths)
+  out <- as.integer(amplicon_widths)
+  names(out) <- genes
+  if (is.null(primers) || nrow(primers) < 1L) {
+    return(out)
+  }
+  for (i in seq_along(genes)) {
+    gid <- genes[[i]]
     fp <- primers$seq.f[primers$gene_id == gid]
     rp <- primers$seq.r[primers$gene_id == gid]
-    if (length(fp) < 1L || length(rp) < 1L) {
-      keep[[i]] <- FALSE
-      next
-    }
+    f_len <- if (length(fp) >= 1L) nchar(fp[[1]]) else 0L
+    r_len <- if (length(rp) >= 1L) nchar(rp[[1]]) else 0L
+    out[[i]] <- as.integer(amplicon_widths[[i]] - f_len - r_len)
+  }
+  out
+}
+
+#' @keywords internal
+.label_length_outliers <- function(reads,
+                                   primers,
+                                   expected_lengths,
+                                   length_tolerance,
+                                   max_primer_edit,
+                                   n_core = 1L) {
+  if (nrow(reads) < 1L) return(reads)
+  assigned <- which(
+    !is.na(reads$gene_id) &
+      nzchar(as.character(reads$gene_id)) &
+      reads$assign_status == "assigned"
+  )
+  if (length(assigned) < 1L) return(reads)
+  by_gene <- split(assigned, as.character(reads$gene_id[assigned]))
+  for (gid in names(by_gene)) {
+    exp_len <- expected_lengths[[gid]]
+    if (is.null(exp_len) || is.na(exp_len) || exp_len < 1L) next
+    fp <- primers$seq.f[primers$gene_id == gid]
+    rp <- primers$seq.r[primers$gene_id == gid]
+    if (length(fp) < 1L || length(rp) < 1L) next
+    idx <- by_gene[[gid]]
     trimmed <- trim_amplicon_insert_cpp(
-      as.character(reads$oriented_seq[[i]]),
+      as.character(reads$oriented_seq[idx]),
       f_primer = fp[[1]],
       r_primer = rp[[1]],
       max_edit = as.integer(max_primer_edit),
-      n_core = 1L
+      n_core = as.integer(max(1L, n_core))
     )
-    if (is.na(trimmed$start[[1]]) || !nzchar(trimmed$seq[[1]])) {
-      keep[[i]] <- FALSE
-      next
+    tseq <- as.character(trimmed$seq)
+    obs <- nchar(tseq)
+    bad <- is.na(trimmed$start) | !nzchar(tseq) |
+      obs < exp_len * (1 - length_tolerance) |
+      obs > exp_len * (1 + length_tolerance)
+    if (any(bad)) {
+      reads$assign_status[idx[bad]] <- "length_outlier"
     }
-    obs <- nchar(trimmed$seq[[1]])
-    keep[[i]] <- obs >= exp_len * (1 - length_tolerance) &&
-      obs <= exp_len * (1 + length_tolerance)
   }
-  reads[keep, , drop = FALSE]
+  reads
 }
 
 #' @keywords internal
@@ -1040,7 +1100,20 @@ doAmpliconResolve <- doAssembleAmplicons
 #' @keywords internal
 .vsearch_id_threshold <- function(min_cluster_identity) {
   id <- as.numeric(min_cluster_identity)
-  max(0.50, min(1.0, id))
+  # Pass through API range (0, 1]; no extra floor (low-id sweeps need < 0.5).
+  max(1e-6, min(1.0, id))
+}
+
+#' Convert absolute edit budget to vsearch-style identity using median length.
+#' Used by Reassess when `min_identity` is not supplied.
+#' @keywords internal
+.vsearch_id_from_edit <- function(seqs, max_edit) {
+  lens <- nchar(as.character(seqs))
+  lens <- lens[is.finite(lens) & lens > 0]
+  med <- if (length(lens)) stats::median(lens) else 1500
+  if (!is.finite(med) || med < 1) med <- 1500
+  id <- 1 - as.numeric(max_edit) / as.numeric(med)
+  max(0.50, min(0.99, id))
 }
 
 #' @keywords internal

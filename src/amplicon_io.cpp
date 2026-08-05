@@ -3,11 +3,9 @@
 
 #include <Rcpp.h>
 #include "demux_internal.h"
-
-#include <zlib.h>
+#include "fastq_io.h"
 
 #include <algorithm>
-#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,88 +18,6 @@ using namespace Rcpp;
 using namespace miaoseq;
 
 namespace {
-
-class LineReader {
-public:
-    explicit LineReader(const std::string& path) : path_(path) {
-        if (path.size() >= 3 &&
-            (path.compare(path.size() - 3, 3, ".gz") == 0 ||
-             path.compare(path.size() - 3, 3, ".GZ") == 0)) {
-            gz_ = gzopen(path.c_str(), "rb");
-            if (!gz_) {
-                stop("Failed to open gzipped FASTQ: " + path);
-            }
-            gzipped_ = true;
-        } else {
-            plain_.open(path.c_str(), std::ios::binary);
-            if (!plain_) {
-                stop("Failed to open FASTQ: " + path);
-            }
-        }
-        buf_.resize(1 << 20); // 1 MiB
-    }
-
-    ~LineReader() {
-        if (gz_) gzclose(gz_);
-        if (plain_.is_open()) plain_.close();
-    }
-
-    bool getline(std::string& out) {
-        out.clear();
-        while (true) {
-            while (pos_ < size_) {
-                char c = buf_[static_cast<size_t>(pos_++)];
-                if (c == '\n') {
-                    if (!out.empty() && out.back() == '\r') out.pop_back();
-                    return true;
-                }
-                out.push_back(c);
-            }
-            if (!refill()) {
-                if (!out.empty()) {
-                    if (out.back() == '\r') out.pop_back();
-                    return true;
-                }
-                return false;
-            }
-        }
-    }
-
-private:
-    bool refill() {
-        pos_ = 0;
-        size_ = 0;
-        if (gzipped_) {
-            int n = gzread(gz_, buf_.data(), static_cast<unsigned>(buf_.size()));
-            if (n <= 0) return false;
-            size_ = n;
-            return true;
-        }
-        plain_.read(buf_.data(), static_cast<std::streamsize>(buf_.size()));
-        std::streamsize n = plain_.gcount();
-        if (n <= 0) return false;
-        size_ = static_cast<int>(n);
-        return true;
-    }
-
-    std::string path_;
-    bool gzipped_ = false;
-    gzFile gz_ = nullptr;
-    std::ifstream plain_;
-    std::vector<char> buf_;
-    int pos_ = 0;
-    int size_ = 0;
-};
-
-inline std::string parse_fastq_id(const std::string& header) {
-    size_t start = 0;
-    if (!header.empty() && header[0] == '@') start = 1;
-    size_t end = start;
-    while (end < header.size() && header[end] != ' ' && header[end] != '\t') {
-        ++end;
-    }
-    return header.substr(start, end - start);
-}
 
 inline std::string reverse_string(const std::string& s) {
     std::string out(s.rbegin(), s.rend());

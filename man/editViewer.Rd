@@ -25,7 +25,7 @@ Invisibly, a character vector of generated PDF file paths.
 }
 \description{
 Reads \code{editcall/editcall_summary.csv} and draws per-plate genotype heatmaps.
-Genotype labels (\code{ref} / \code{sub} / \code{delN} / \code{insN} / \code{indelD-I})
-are parsed structurally; SNP (\code{sub}) is never treated as frameshift.
-In-frame classes use net indel length mod 3 (not CDS phase).
+Genotype labels (\code{ref} / \code{sub} / \code{delN} / \code{insN} / \code{indelD-I}) are parsed
+structurally; SNP (\code{sub}) is never treated as frameshift. In-frame classes
+use \strong{net indel length mod 3} (not CDS phase).
 }

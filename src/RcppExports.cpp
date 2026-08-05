@@ -11,8 +11,8 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
 // trim_amplicon_insert_cpp
-List trim_amplicon_insert_cpp(CharacterVector seqs, std::string f_primer, std::string r_primer, int max_edit, int n_core);
-RcppExport SEXP _miaoseq_trim_amplicon_insert_cpp(SEXP seqsSEXP, SEXP f_primerSEXP, SEXP r_primerSEXP, SEXP max_editSEXP, SEXP n_coreSEXP) {
+List trim_amplicon_insert_cpp(CharacterVector seqs, std::string f_primer, std::string r_primer, int max_edit, int n_core, bool include_primers);
+RcppExport SEXP _miaoseq_trim_amplicon_insert_cpp(SEXP seqsSEXP, SEXP f_primerSEXP, SEXP r_primerSEXP, SEXP max_editSEXP, SEXP n_coreSEXP, SEXP include_primersSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -21,7 +21,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< std::string >::type r_primer(r_primerSEXP);
     Rcpp::traits::input_parameter< int >::type max_edit(max_editSEXP);
     Rcpp::traits::input_parameter< int >::type n_core(n_coreSEXP);
-    rcpp_result_gen = Rcpp::wrap(trim_amplicon_insert_cpp(seqs, f_primer, r_primer, max_edit, n_core));
+    Rcpp::traits::input_parameter< bool >::type include_primers(include_primersSEXP);
+    rcpp_result_gen = Rcpp::wrap(trim_amplicon_insert_cpp(seqs, f_primer, r_primer, max_edit, n_core, include_primers));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -217,9 +218,127 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// demux_fastq_stream_cpp
+List demux_fastq_stream_cpp(CharacterVector fastq_files, std::string demult_dir, std::string f_suffix, std::string r_suffix, CharacterVector f_barcodes, CharacterVector f_barcode_names, CharacterVector r_barcodes, CharacterVector r_barcode_names, CharacterVector pair_f_names, CharacterVector pair_r_names, CharacterVector pair_ids, CharacterVector sample_ids, int end_window, int max_anchor_edit, int max_barcode_edit, bool allow_revcomp, bool allow_single_end, int n_core, int chunk_size, bool split_reads, bool compress, bool include_unassigned_fastq);
+RcppExport SEXP _miaoseq_demux_fastq_stream_cpp(SEXP fastq_filesSEXP, SEXP demult_dirSEXP, SEXP f_suffixSEXP, SEXP r_suffixSEXP, SEXP f_barcodesSEXP, SEXP f_barcode_namesSEXP, SEXP r_barcodesSEXP, SEXP r_barcode_namesSEXP, SEXP pair_f_namesSEXP, SEXP pair_r_namesSEXP, SEXP pair_idsSEXP, SEXP sample_idsSEXP, SEXP end_windowSEXP, SEXP max_anchor_editSEXP, SEXP max_barcode_editSEXP, SEXP allow_revcompSEXP, SEXP allow_single_endSEXP, SEXP n_coreSEXP, SEXP chunk_sizeSEXP, SEXP split_readsSEXP, SEXP compressSEXP, SEXP include_unassigned_fastqSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< CharacterVector >::type fastq_files(fastq_filesSEXP);
+    Rcpp::traits::input_parameter< std::string >::type demult_dir(demult_dirSEXP);
+    Rcpp::traits::input_parameter< std::string >::type f_suffix(f_suffixSEXP);
+    Rcpp::traits::input_parameter< std::string >::type r_suffix(r_suffixSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type f_barcodes(f_barcodesSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type f_barcode_names(f_barcode_namesSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type r_barcodes(r_barcodesSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type r_barcode_names(r_barcode_namesSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type pair_f_names(pair_f_namesSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type pair_r_names(pair_r_namesSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type pair_ids(pair_idsSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type sample_ids(sample_idsSEXP);
+    Rcpp::traits::input_parameter< int >::type end_window(end_windowSEXP);
+    Rcpp::traits::input_parameter< int >::type max_anchor_edit(max_anchor_editSEXP);
+    Rcpp::traits::input_parameter< int >::type max_barcode_edit(max_barcode_editSEXP);
+    Rcpp::traits::input_parameter< bool >::type allow_revcomp(allow_revcompSEXP);
+    Rcpp::traits::input_parameter< bool >::type allow_single_end(allow_single_endSEXP);
+    Rcpp::traits::input_parameter< int >::type n_core(n_coreSEXP);
+    Rcpp::traits::input_parameter< int >::type chunk_size(chunk_sizeSEXP);
+    Rcpp::traits::input_parameter< bool >::type split_reads(split_readsSEXP);
+    Rcpp::traits::input_parameter< bool >::type compress(compressSEXP);
+    Rcpp::traits::input_parameter< bool >::type include_unassigned_fastq(include_unassigned_fastqSEXP);
+    rcpp_result_gen = Rcpp::wrap(demux_fastq_stream_cpp(fastq_files, demult_dir, f_suffix, r_suffix, f_barcodes, f_barcode_names, r_barcodes, r_barcode_names, pair_f_names, pair_r_names, pair_ids, sample_ids, end_window, max_anchor_edit, max_barcode_edit, allow_revcomp, allow_single_end, n_core, chunk_size, split_reads, compress, include_unassigned_fastq));
+    return rcpp_result_gen;
+END_RCPP
+}
+// split_fastq_by_assignment_cpp
+List split_fastq_by_assignment_cpp(CharacterVector fastq_files, std::string assignments_tsv, std::string out_dir, bool compress, bool include_unassigned, std::string unassigned_tsv);
+RcppExport SEXP _miaoseq_split_fastq_by_assignment_cpp(SEXP fastq_filesSEXP, SEXP assignments_tsvSEXP, SEXP out_dirSEXP, SEXP compressSEXP, SEXP include_unassignedSEXP, SEXP unassigned_tsvSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< CharacterVector >::type fastq_files(fastq_filesSEXP);
+    Rcpp::traits::input_parameter< std::string >::type assignments_tsv(assignments_tsvSEXP);
+    Rcpp::traits::input_parameter< std::string >::type out_dir(out_dirSEXP);
+    Rcpp::traits::input_parameter< bool >::type compress(compressSEXP);
+    Rcpp::traits::input_parameter< bool >::type include_unassigned(include_unassignedSEXP);
+    Rcpp::traits::input_parameter< std::string >::type unassigned_tsv(unassigned_tsvSEXP);
+    rcpp_result_gen = Rcpp::wrap(split_fastq_by_assignment_cpp(fastq_files, assignments_tsv, out_dir, compress, include_unassigned, unassigned_tsv));
+    return rcpp_result_gen;
+END_RCPP
+}
+// edlib_nw_align_cpp
+List edlib_nw_align_cpp(std::string query, std::string target);
+RcppExport SEXP _miaoseq_edlib_nw_align_cpp(SEXP querySEXP, SEXP targetSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< std::string >::type query(querySEXP);
+    Rcpp::traits::input_parameter< std::string >::type target(targetSEXP);
+    rcpp_result_gen = Rcpp::wrap(edlib_nw_align_cpp(query, target));
+    return rcpp_result_gen;
+END_RCPP
+}
+// gapped_window_bounds_cpp
+IntegerVector gapped_window_bounds_cpp(std::string ref_aln, int start_ungapped, int end_ungapped);
+RcppExport SEXP _miaoseq_gapped_window_bounds_cpp(SEXP ref_alnSEXP, SEXP start_ungappedSEXP, SEXP end_ungappedSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< std::string >::type ref_aln(ref_alnSEXP);
+    Rcpp::traits::input_parameter< int >::type start_ungapped(start_ungappedSEXP);
+    Rcpp::traits::input_parameter< int >::type end_ungapped(end_ungappedSEXP);
+    rcpp_result_gen = Rcpp::wrap(gapped_window_bounds_cpp(ref_aln, start_ungapped, end_ungapped));
+    return rcpp_result_gen;
+END_RCPP
+}
+// extract_adaptive_edit_window_cpp
+List extract_adaptive_edit_window_cpp(std::string ref_aln, std::string query_aln, int start, int end, int anchor_bp, int max_expand);
+RcppExport SEXP _miaoseq_extract_adaptive_edit_window_cpp(SEXP ref_alnSEXP, SEXP query_alnSEXP, SEXP startSEXP, SEXP endSEXP, SEXP anchor_bpSEXP, SEXP max_expandSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< std::string >::type ref_aln(ref_alnSEXP);
+    Rcpp::traits::input_parameter< std::string >::type query_aln(query_alnSEXP);
+    Rcpp::traits::input_parameter< int >::type start(startSEXP);
+    Rcpp::traits::input_parameter< int >::type end(endSEXP);
+    Rcpp::traits::input_parameter< int >::type anchor_bp(anchor_bpSEXP);
+    Rcpp::traits::input_parameter< int >::type max_expand(max_expandSEXP);
+    rcpp_result_gen = Rcpp::wrap(extract_adaptive_edit_window_cpp(ref_aln, query_aln, start, end, anchor_bp, max_expand));
+    return rcpp_result_gen;
+END_RCPP
+}
+// editcall_process_reads_cpp
+List editcall_process_reads_cpp(CharacterVector sample_id, CharacterVector index_pair_id, CharacterVector read_id, CharacterVector gene_id, CharacterVector seqs, CharacterVector pam_gene, CharacterVector pam_target_gene, CharacterVector pam_guide_id, IntegerVector pam_cut_insert, IntegerVector pam_win_start, IntegerVector pam_win_end, CharacterVector ref_gene_id, CharacterVector ref_seq, int check_window, int anchor_bp, int max_expand, int min_span_bp, int excision_tol_bp, int n_core);
+RcppExport SEXP _miaoseq_editcall_process_reads_cpp(SEXP sample_idSEXP, SEXP index_pair_idSEXP, SEXP read_idSEXP, SEXP gene_idSEXP, SEXP seqsSEXP, SEXP pam_geneSEXP, SEXP pam_target_geneSEXP, SEXP pam_guide_idSEXP, SEXP pam_cut_insertSEXP, SEXP pam_win_startSEXP, SEXP pam_win_endSEXP, SEXP ref_gene_idSEXP, SEXP ref_seqSEXP, SEXP check_windowSEXP, SEXP anchor_bpSEXP, SEXP max_expandSEXP, SEXP min_span_bpSEXP, SEXP excision_tol_bpSEXP, SEXP n_coreSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< CharacterVector >::type sample_id(sample_idSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type index_pair_id(index_pair_idSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type read_id(read_idSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type gene_id(gene_idSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type seqs(seqsSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type pam_gene(pam_geneSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type pam_target_gene(pam_target_geneSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type pam_guide_id(pam_guide_idSEXP);
+    Rcpp::traits::input_parameter< IntegerVector >::type pam_cut_insert(pam_cut_insertSEXP);
+    Rcpp::traits::input_parameter< IntegerVector >::type pam_win_start(pam_win_startSEXP);
+    Rcpp::traits::input_parameter< IntegerVector >::type pam_win_end(pam_win_endSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type ref_gene_id(ref_gene_idSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type ref_seq(ref_seqSEXP);
+    Rcpp::traits::input_parameter< int >::type check_window(check_windowSEXP);
+    Rcpp::traits::input_parameter< int >::type anchor_bp(anchor_bpSEXP);
+    Rcpp::traits::input_parameter< int >::type max_expand(max_expandSEXP);
+    Rcpp::traits::input_parameter< int >::type min_span_bp(min_span_bpSEXP);
+    Rcpp::traits::input_parameter< int >::type excision_tol_bp(excision_tol_bpSEXP);
+    Rcpp::traits::input_parameter< int >::type n_core(n_coreSEXP);
+    rcpp_result_gen = Rcpp::wrap(editcall_process_reads_cpp(sample_id, index_pair_id, read_id, gene_id, seqs, pam_gene, pam_target_gene, pam_guide_id, pam_cut_insert, pam_win_start, pam_win_end, ref_gene_id, ref_seq, check_window, anchor_bp, max_expand, min_span_bp, excision_tol_bp, n_core));
+    return rcpp_result_gen;
+END_RCPP
+}
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_miaoseq_trim_amplicon_insert_cpp", (DL_FUNC) &_miaoseq_trim_amplicon_insert_cpp, 5},
+    {"_miaoseq_trim_amplicon_insert_cpp", (DL_FUNC) &_miaoseq_trim_amplicon_insert_cpp, 6},
     {"_miaoseq_find_primer_hit_cpp", (DL_FUNC) &_miaoseq_find_primer_hit_cpp, 3},
     {"_miaoseq_edlib_edit_distance_cpp", (DL_FUNC) &_miaoseq_edlib_edit_distance_cpp, 3},
     {"_miaoseq_assign_genes_primers_cpp", (DL_FUNC) &_miaoseq_assign_genes_primers_cpp, 7},
@@ -233,6 +352,12 @@ static const R_CallMethodDef CallEntries[] = {
     {"_miaoseq_reverse_quals_cpp", (DL_FUNC) &_miaoseq_reverse_quals_cpp, 2},
     {"_miaoseq_build_barcode_dict_cpp", (DL_FUNC) &_miaoseq_build_barcode_dict_cpp, 3},
     {"_miaoseq_demux_reads_cpp", (DL_FUNC) &_miaoseq_demux_reads_cpp, 18},
+    {"_miaoseq_demux_fastq_stream_cpp", (DL_FUNC) &_miaoseq_demux_fastq_stream_cpp, 22},
+    {"_miaoseq_split_fastq_by_assignment_cpp", (DL_FUNC) &_miaoseq_split_fastq_by_assignment_cpp, 6},
+    {"_miaoseq_edlib_nw_align_cpp", (DL_FUNC) &_miaoseq_edlib_nw_align_cpp, 2},
+    {"_miaoseq_gapped_window_bounds_cpp", (DL_FUNC) &_miaoseq_gapped_window_bounds_cpp, 3},
+    {"_miaoseq_extract_adaptive_edit_window_cpp", (DL_FUNC) &_miaoseq_extract_adaptive_edit_window_cpp, 6},
+    {"_miaoseq_editcall_process_reads_cpp", (DL_FUNC) &_miaoseq_editcall_process_reads_cpp, 19},
     {NULL, NULL, 0}
 };
 

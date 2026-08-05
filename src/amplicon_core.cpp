@@ -67,29 +67,40 @@ GeneOrientationScore score_gene(const std::string& front,
                                 const std::string& f_rc,
                                 const std::string& r_rc,
                                 int max_primer_edit,
+                                int max_useful_total,
                                 long long* n_edlib) {
     GeneOrientationScore best;
     best.gene_idx = gene_idx;
+    if (max_useful_total < 0) return best;
 
     // native: F at front, R_RC at rear
     {
         PrimerHit hf = find_primer_hw(front, f_primer, max_primer_edit, n_edlib);
-        PrimerHit hr = find_primer_hw(rear, r_rc, max_primer_edit, n_edlib);
-        if (hf.found && hr.found) {
-            best.ok = true;
-            best.flipped = false;
-            best.total_edit = hf.edit + hr.edit;
-            best.f_edit = hf.edit;
-            best.r_edit = hr.edit;
+        if (hf.found && hf.edit <= max_useful_total) {
+            PrimerHit hr = find_primer_hw(rear, r_rc, max_primer_edit, n_edlib);
+            if (hr.found) {
+                const int total = hf.edit + hr.edit;
+                if (total <= max_useful_total) {
+                    best.ok = true;
+                    best.flipped = false;
+                    best.total_edit = total;
+                    best.f_edit = hf.edit;
+                    best.r_edit = hr.edit;
+                    max_useful_total = total;
+                    if (total == 0) return best;
+                }
+            }
         }
     }
     // flipped: R at front, F_RC at rear
     {
         PrimerHit hf = find_primer_hw(front, r_primer, max_primer_edit, n_edlib);
+        if (!hf.found || hf.edit > max_useful_total) return best;
         PrimerHit hr = find_primer_hw(rear, f_rc, max_primer_edit, n_edlib);
-        if (hf.found && hr.found) {
-            const int total = hf.edit + hr.edit;
-            if (!best.ok || total < best.total_edit) {
+        if (!hr.found) return best;
+        const int total = hf.edit + hr.edit;
+        if (!best.ok || total < best.total_edit) {
+            if (total <= max_useful_total) {
                 best.ok = true;
                 best.flipped = true;
                 best.total_edit = total;
@@ -332,29 +343,46 @@ std::string quality_consensus(const std::vector<std::string>& seqs,
 TrimSpan trim_between_primers(const std::string& seq,
                               const std::string& f_primer,
                               const std::string& r_primer,
-                              int max_edit) {
+                              int max_edit,
+                              bool include_primers = false) {
     TrimSpan out;
     if (seq.empty()) return out;
     const std::string r_rc = reverse_complement(r_primer);
     PrimerHit fh = find_primer_hw(seq, f_primer, max_edit, nullptr);
     PrimerHit rh = find_primer_hw(seq, r_rc, max_edit, nullptr);
     if (!fh.found || !rh.found) return out;
-    if (fh.end >= rh.start) return out;
-    const int from = fh.end + 1;
-    const int len = rh.start - from;
+
+    int from = -1;
+    int end_excl = -1;
+    if (include_primers) {
+        // Keep F..R primer span (edlib endLocations are inclusive).
+        if (fh.start > rh.end) return out;
+        from = fh.start;
+        end_excl = rh.end + 1;
+    } else {
+        // Insert only: after F primer through before R primer.
+        if (fh.end >= rh.start) return out;
+        from = fh.end + 1;
+        end_excl = rh.start;
+    }
+    const int len = end_excl - from;
     if (len < 1) return out;
     out.start = from;
-    out.end = rh.start;
+    out.end = end_excl;
     out.seq = seq.substr(static_cast<size_t>(from), static_cast<size_t>(len));
     return out;
 }
 
 } // namespace
 
-//' Trim reads to the insert between primer pairs (C++)
+//' Trim reads to the amplicon span defined by primer pairs (C++)
 //'
-//' Returns a list with trimmed `seq`, and 0-based half-open insert
+//' Returns a list with trimmed `seq`, and 0-based half-open
 //' coordinates `start` / `end` (NA when trim fails).
+//'
+//' When `include_primers` is `FALSE` (default), the span is the insert
+//' between primers. When `TRUE`, the span includes both primer matches
+//' (F start through R end), so only outer adapters are removed.
 //'
 //' @keywords internal
 //' @noRd
@@ -363,7 +391,8 @@ List trim_amplicon_insert_cpp(CharacterVector seqs,
                               std::string f_primer,
                               std::string r_primer,
                               int max_edit = 5,
-                              int n_core = 1) {
+                              int n_core = 1,
+                              bool include_primers = false) {
     f_primer = to_upper_acgt(f_primer);
     r_primer = to_upper_acgt(r_primer);
     const int n = seqs.size();
@@ -382,7 +411,8 @@ List trim_amplicon_insert_cpp(CharacterVector seqs,
 #endif
     for (int i = 0; i < n; ++i) {
         const std::string seq = to_upper_acgt(v_seqs[static_cast<size_t>(i)]);
-        TrimSpan span = trim_between_primers(seq, f_primer, r_primer, max_edit);
+        TrimSpan span = trim_between_primers(
+            seq, f_primer, r_primer, max_edit, include_primers);
         trimmed_v[static_cast<size_t>(i)] = span.seq;
         start_v[static_cast<size_t>(i)] = span.start;
         end_v[static_cast<size_t>(i)] = span.end;
@@ -495,6 +525,7 @@ List assign_genes_primers_cpp(CharacterVector seqs,
 
         GeneOrientationScore best;
         int n_best = 0;
+        int useful_cap = std::numeric_limits<int>::max();
         for (int gi = 0; gi < g; ++gi) {
             GeneOrientationScore cand = score_gene(
                 front, rear, gi,
@@ -502,11 +533,12 @@ List assign_genes_primers_cpp(CharacterVector seqs,
                 r_pr[static_cast<size_t>(gi)],
                 f_rc[static_cast<size_t>(gi)],
                 r_rc[static_cast<size_t>(gi)],
-                max_primer_edit, &local_edlib);
+                max_primer_edit, useful_cap, &local_edlib);
             if (!cand.ok) continue;
             if (!best.ok || cand.total_edit < best.total_edit) {
                 best = cand;
                 n_best = 1;
+                useful_cap = best.total_edit;
             } else if (best.ok && cand.total_edit == best.total_edit) {
                 ++n_best;
             }

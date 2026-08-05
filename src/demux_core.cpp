@@ -2,10 +2,12 @@
 // [[Rcpp::depends(Rcpp)]]
 
 #include <Rcpp.h>
+#include "demux_engine.h"
 #include "demux_internal.h"
 
 #include <algorithm>
-#include <unordered_set>
+#include <string>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -13,131 +15,6 @@
 
 using namespace Rcpp;
 using namespace miaoseq;
-
-namespace {
-
-struct EndHit {
-    bool ok = false;
-    int parent_id = -1;
-    int barcode_edit = -1;
-    int anchor_edit = -1;
-};
-
-bool better_hit(const EndHit& a, const EndHit& b) {
-    if (!a.ok) return false;
-    if (!b.ok) return true;
-    if (a.barcode_edit != b.barcode_edit) return a.barcode_edit < b.barcode_edit;
-    return a.anchor_edit < b.anchor_edit;
-}
-
-EndHit match_end(const std::string& window,
-                 const std::string& suffix,
-                 int barcode_len,
-                 const MutantDict& dict,
-                 int max_anchor_edit,
-                 bool allow_revcomp,
-                 bool* saw_suffix,
-                 long long* n_edlib) {
-    EndHit best;
-    std::vector<AnchorHit> anchors = find_suffix_anchors(
-        window, suffix, max_anchor_edit, allow_revcomp, n_edlib);
-    if (!anchors.empty() && saw_suffix) *saw_suffix = true;
-    if (anchors.empty()) return best;
-
-    static const int offsets[] = {0, -1, 1, -2, 2, -3, 3, -4, 4};
-    for (const AnchorHit& anchor : anchors) {
-        for (int off : offsets) {
-            std::string bc = extract_barcode(anchor.seq, anchor.start, barcode_len, off);
-            if (bc.empty()) continue;
-            BarcodeHit hit = lookup_barcode(bc, dict);
-            if (!hit.found) continue;
-
-            EndHit cand;
-            cand.ok = true;
-            cand.parent_id = hit.parent_id;
-            cand.barcode_edit = hit.edit;
-            cand.anchor_edit = anchor.edit;
-            if (better_hit(cand, best)) best = cand;
-            if (best.ok && best.barcode_edit == 0 && best.anchor_edit == 0) return best;
-        }
-    }
-    return best;
-}
-
-struct ReadEnds {
-    EndHit f_front, f_rear, r_front, r_rear;
-    bool any_suffix = false;
-};
-
-ReadEnds scan_ends(const std::string& seq_raw,
-                   const std::string& f_suffix,
-                   const std::string& r_suffix,
-                   int f_bc_len,
-                   int r_bc_len,
-                   const MutantDict& f_dict,
-                   const MutantDict& r_dict,
-                   int end_window,
-                   int max_anchor_edit,
-                   bool allow_revcomp,
-                   long long* n_edlib) {
-    ReadEnds ends;
-    std::string seq = to_upper_acgt(seq_raw);
-    const int n = static_cast<int>(seq.size());
-    if (n < 1) return ends;
-    const int w = std::min(end_window, n);
-    std::string front = seq.substr(0, static_cast<size_t>(w));
-    std::string rear = seq.substr(static_cast<size_t>(n - w), static_cast<size_t>(w));
-
-    ends.f_front = match_end(front, f_suffix, f_bc_len, f_dict,
-                             max_anchor_edit, allow_revcomp,
-                             &ends.any_suffix, n_edlib);
-    ends.f_rear = match_end(rear, f_suffix, f_bc_len, f_dict,
-                            max_anchor_edit, allow_revcomp,
-                            &ends.any_suffix, n_edlib);
-    ends.r_front = match_end(front, r_suffix, r_bc_len, r_dict,
-                             max_anchor_edit, allow_revcomp,
-                             &ends.any_suffix, n_edlib);
-    ends.r_rear = match_end(rear, r_suffix, r_bc_len, r_dict,
-                            max_anchor_edit, allow_revcomp,
-                            &ends.any_suffix, n_edlib);
-    return ends;
-}
-
-int orientation_score(const EndHit& f, const EndHit& r) {
-    return f.barcode_edit * 1000 + r.barcode_edit * 1000 +
-           f.anchor_edit + r.anchor_edit;
-}
-
-int single_end_score(const EndHit& h) {
-    return h.barcode_edit * 1000 + h.anchor_edit;
-}
-
-struct SingleCand {
-    EndHit hit;
-    bool is_f = true;
-    int row = -1;
-    int score = 0;
-};
-
-void consider_single_hit(const EndHit& hit,
-                         bool is_f,
-                         const std::unordered_map<std::string, int>& name_to_row,
-                         const MutantDict& dict,
-                         std::vector<SingleCand>& cands) {
-    if (!hit.ok) return;
-    const std::string& name =
-        dict.parent_names[static_cast<size_t>(hit.parent_id)];
-    auto it = name_to_row.find(name);
-    if (it == name_to_row.end()) return;
-    SingleCand c;
-    c.hit = hit;
-    c.is_f = is_f;
-    c.row = it->second;
-    c.score = single_end_score(hit);
-    cands.push_back(c);
-}
-
-} // namespace
 
 //' Build barcode mutant dictionary (C++)
 //' @keywords internal
@@ -204,29 +81,18 @@ List demux_reads_cpp(CharacterVector seqs,
                      bool allow_single_end = false,
                      int n_core = 1) {
     const int n = seqs.size();
-    MutantDict f_dict = build_mutant_dict(
+    DemuxEngine engine(
+        f_suffix, r_suffix,
         as<std::vector<std::string>>(f_barcodes),
         as<std::vector<std::string>>(f_barcode_names),
-        max_barcode_edit);
-    MutantDict r_dict = build_mutant_dict(
         as<std::vector<std::string>>(r_barcodes),
         as<std::vector<std::string>>(r_barcode_names),
-        max_barcode_edit);
-
-    const int f_bc_len = f_barcodes.size() > 0 ?
-        static_cast<int>(std::string(f_barcodes[0]).size()) : 0;
-    const int r_bc_len = r_barcodes.size() > 0 ?
-        static_cast<int>(std::string(r_barcodes[0]).size()) : 0;
-
-    std::unordered_map<std::string, int> pair_map;
-    std::unordered_map<std::string, int> f_name_to_row;
-    std::unordered_map<std::string, int> r_name_to_row;
-    for (int i = 0; i < pair_ids.size(); ++i) {
-        pair_map[std::string(pair_f_names[i]) + "\t" +
-                 std::string(pair_r_names[i])] = i;
-        f_name_to_row[std::string(pair_f_names[i])] = i;
-        r_name_to_row[std::string(pair_r_names[i])] = i;
-    }
+        as<std::vector<std::string>>(pair_f_names),
+        as<std::vector<std::string>>(pair_r_names),
+        as<std::vector<std::string>>(pair_ids),
+        as<std::vector<std::string>>(sample_ids),
+        end_window, max_anchor_edit, max_barcode_edit,
+        allow_revcomp, allow_single_end);
 
     std::vector<std::string> v_seqs = as<std::vector<std::string>>(seqs);
 
@@ -247,138 +113,17 @@ List demux_reads_cpp(CharacterVector seqs,
 #endif
     for (int i = 0; i < n; ++i) {
         long long local_edlib = 0;
-        ReadEnds ends = scan_ends(
-            v_seqs[static_cast<size_t>(i)],
-            f_suffix, r_suffix,
-            f_bc_len, r_bc_len, f_dict, r_dict,
-            end_window, max_anchor_edit,
-            allow_revcomp, &local_edlib);
-
-        struct Cand {
-            bool ok = false;
-            EndHit f, r;
-            int row = -1;
-            int score = 0;
-        };
-
-        Cand best, second;
-        bool had_end_pair = false;
-
-        auto consider = [&](const EndHit& f, const EndHit& r) {
-            if (f.ok && r.ok) had_end_pair = true;
-            if (!(f.ok && r.ok)) return;
-            const std::string& f_name =
-                f_dict.parent_names[static_cast<size_t>(f.parent_id)];
-            const std::string& r_name =
-                r_dict.parent_names[static_cast<size_t>(r.parent_id)];
-            auto pit = pair_map.find(f_name + "\t" + r_name);
-            if (pit == pair_map.end()) return;
-            Cand c;
-            c.ok = true;
-            c.f = f;
-            c.r = r;
-            c.row = pit->second;
-            c.score = orientation_score(f, r);
-            if (!best.ok || c.score < best.score) {
-                second = best;
-                best = c;
-            } else if (!second.ok || c.score < second.score) {
-                second = c;
-            }
-        };
-
-        consider(ends.f_front, ends.r_rear);
-        consider(ends.f_rear, ends.r_front);
-
-        if (best.ok && second.ok && second.score == best.score &&
-            second.row != best.row) {
-            reason[static_cast<size_t>(i)] = "ambiguous_pair";
-            n_edlib += local_edlib;
-            continue;
-        }
-
-        if (!best.ok) {
-            bool rescued = false;
-            if (allow_single_end) {
-                std::vector<SingleCand> single_cands;
-                consider_single_hit(ends.f_front, true, f_name_to_row, f_dict, single_cands);
-                consider_single_hit(ends.f_rear, true, f_name_to_row, f_dict, single_cands);
-                consider_single_hit(ends.r_front, false, r_name_to_row, r_dict, single_cands);
-                consider_single_hit(ends.r_rear, false, r_name_to_row, r_dict, single_cands);
-
-                std::unordered_set<int> unique_rows;
-                for (const SingleCand& c : single_cands) unique_rows.insert(c.row);
-
-                if (unique_rows.size() == 1) {
-                    const int row = *unique_rows.begin();
-                    SingleCand best_single;
-                    bool have_best = false;
-                    for (const SingleCand& c : single_cands) {
-                        if (c.row != row) continue;
-                        if (!have_best || c.score < best_single.score ||
-                            (c.score == best_single.score && c.is_f && !best_single.is_f)) {
-                            best_single = c;
-                            have_best = true;
-                        }
-                    }
-
-                    status[static_cast<size_t>(i)] = 1;
-                    reason[static_cast<size_t>(i)] = "";
-                    out_pair[static_cast<size_t>(i)] = std::string(pair_ids[row]);
-                    out_sample[static_cast<size_t>(i)] = std::string(sample_ids[row]);
-                    if (best_single.is_f) {
-                        out_f[static_cast<size_t>(i)] =
-                            f_dict.parent_names[static_cast<size_t>(best_single.hit.parent_id)];
-                        be_f[static_cast<size_t>(i)] = best_single.hit.barcode_edit;
-                        assign_mode[static_cast<size_t>(i)] = "single_f";
-                    } else {
-                        out_r[static_cast<size_t>(i)] =
-                            r_dict.parent_names[static_cast<size_t>(best_single.hit.parent_id)];
-                        be_r[static_cast<size_t>(i)] = best_single.hit.barcode_edit;
-                        assign_mode[static_cast<size_t>(i)] = "single_r";
-                    }
-                    if (best_single.hit.barcode_edit == 0) {
-                        match_class[static_cast<size_t>(i)] = "complete_match";
-                    } else {
-                        match_class[static_cast<size_t>(i)] = "fuzzy_match";
-                    }
-                    rescued = true;
-                } else if (unique_rows.size() > 1) {
-                    reason[static_cast<size_t>(i)] = "ambiguous_ends";
-                    rescued = true;
-                }
-            }
-
-            if (!rescued) {
-                if (had_end_pair) {
-                    reason[static_cast<size_t>(i)] = "invalid_pair";
-                } else if (!ends.any_suffix) {
-                    reason[static_cast<size_t>(i)] = "no_suffix";
-                } else {
-                    reason[static_cast<size_t>(i)] = "barcode_fail";
-                }
-            }
-            n_edlib += local_edlib;
-            continue;
-        }
-
-        int row = best.row;
-        status[static_cast<size_t>(i)] = 1;
-        reason[static_cast<size_t>(i)] = "";
-        out_pair[static_cast<size_t>(i)] = std::string(pair_ids[row]);
-        out_sample[static_cast<size_t>(i)] = std::string(sample_ids[row]);
-        out_f[static_cast<size_t>(i)] =
-            f_dict.parent_names[static_cast<size_t>(best.f.parent_id)];
-        out_r[static_cast<size_t>(i)] =
-            r_dict.parent_names[static_cast<size_t>(best.r.parent_id)];
-        be_f[static_cast<size_t>(i)] = best.f.barcode_edit;
-        be_r[static_cast<size_t>(i)] = best.r.barcode_edit;
-        if (best.f.barcode_edit == 0 && best.r.barcode_edit == 0) {
-            match_class[static_cast<size_t>(i)] = "complete_match";
-        } else {
-            match_class[static_cast<size_t>(i)] = "fuzzy_match";
-        }
-        assign_mode[static_cast<size_t>(i)] = "dual_end";
+        DemuxOut hit = engine.classify(v_seqs[static_cast<size_t>(i)], &local_edlib);
+        status[static_cast<size_t>(i)] = hit.status;
+        reason[static_cast<size_t>(i)] = hit.reason;
+        out_pair[static_cast<size_t>(i)] = hit.index_pair_id;
+        out_sample[static_cast<size_t>(i)] = hit.sample_id;
+        out_f[static_cast<size_t>(i)] = hit.f_index_id;
+        out_r[static_cast<size_t>(i)] = hit.r_index_id;
+        be_f[static_cast<size_t>(i)] = hit.barcode_edit_f;
+        be_r[static_cast<size_t>(i)] = hit.barcode_edit_r;
+        match_class[static_cast<size_t>(i)] = hit.match_class;
+        assign_mode[static_cast<size_t>(i)] = hit.assign_mode;
         n_edlib += local_edlib;
     }
 

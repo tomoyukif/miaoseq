@@ -18,7 +18,8 @@ doDemultiplex(
   split_reads = FALSE,
   compress = TRUE,
   chunk_size = 20000,
-  stats_unassign = FALSE
+  stats_unassign = FALSE,
+  return_tables = TRUE
 )
 }
 \arguments{
@@ -46,25 +47,35 @@ If omitted, \code{sample_id} equals \code{index_pair_id}.}
 
 \item{allow_single_end}{If \code{TRUE}, assign reads when only one end (F or R)
 yields a unique barcode hit. Allowed only when every F and every R barcode
-ID appears in exactly one index pair. On combinatorial plates the run stops
-at startup. Conflicting hits on both ends are rejected as \code{ambiguous_ends}.}
+ID appears in exactly one index pair (non-combinatorial layout). On
+combinatorial plates (shared F/R IDs across wells), the run stops at
+startup. Conflicting hits on both ends are rejected as \code{ambiguous_ends}.}
 
-\item{split_reads}{If \code{TRUE}, call \code{\link[=splitDemultiplexReads]{splitDemultiplexReads()}} after assignment.}
+\item{split_reads}{If \code{TRUE}, write per-sample FASTQ under
+\verb{demult_dir/by_sample/} in the same streaming pass.}
 
-\item{compress}{Passed to \code{\link[=splitDemultiplexReads]{splitDemultiplexReads()}} when \code{split_reads = TRUE}.}
+\item{compress}{If \code{TRUE} and \code{split_reads = TRUE}, write \code{.fq.gz}.}
 
 \item{chunk_size}{Reads per C++ batch (streaming to limit peak memory).}
 
 \item{stats_unassign}{If \code{TRUE}, write \code{stats_unassigned.tsv} summarizing
 unassigned read counts by \code{reason}.}
+
+\item{return_tables}{If \code{TRUE} (default), read \code{assignments.tsv} /
+\code{unassigned.tsv} back into data.frames for the return value. Set
+\code{FALSE} to keep peak RAM low (tables remain on disk).}
 }
 \value{
 A list with \code{assignments}, \code{summary}, \code{unassigned}, \code{demult_dir},
 and \code{n_edlib} (total edlib calls in the C++ core). When
-\code{stats_unassign = TRUE}, also includes \code{stats_unassigned}.
+\code{stats_unassign = TRUE}, also includes \code{stats_unassigned}. When
+\code{return_tables = FALSE}, \code{assignments} / \code{unassigned} are empty
+placeholders and paths are in \code{assignments_tsv} / \code{unassigned_tsv}.
 }
 \description{
 Classifies multiplexed FASTQ reads into samples using a two-step procedure
 implemented in C++ (edlib HW for adapter \strong{suffix} anchors; barcode matching
-via a precomputed mutant dictionary).
+via a precomputed mutant dictionary). FASTQ is streamed in chunks (no full
+Biostrings load). Assignment tables are written incrementally; when
+\code{split_reads = TRUE}, per-sample FASTQ files are written in the same pass.
 }

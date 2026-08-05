@@ -15,11 +15,12 @@ doAssignGenes(
   length_tolerance = 0.25,
   samples = NULL,
   n_core = 1L,
+  store_sequences = TRUE,
   overwrite = FALSE,
   stats_unassign = FALSE
 )
 }
 \description{
-Reads demultiplexed FASTQ records, assigns each read to a target gene by primer matching, applies orientation normalization, and optionally filters by trimmed insert length against \code{amplicon_fn} widths. Amplicon-ref fallback assignment has been removed.
+Reads demultiplexed FASTQ records, assigns each read to a target gene by primer matching, applies orientation normalization, and optionally labels trimmed-insert length outliers against \code{amplicon_fn} (amplicon width minus primer lengths). Outliers are kept as \code{assign_status = "length_outlier"} and are not dropped. Amplicon-ref fallback assignment has been removed. \code{n_core} parallelizes primer assignment and length-trim. \code{store_sequences = FALSE} writes empty oriented sequence columns (Editcall can reload FASTQ; Assemble from disk needs sequences).
 }
 \value{A GeneAssignResult list with \code{samples}, \code{out_dir}, \code{table}, and optional \code{stats_unassigned}.}

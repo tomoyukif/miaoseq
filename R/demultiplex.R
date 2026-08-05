@@ -2,13 +2,26 @@
 # Demultiplexing (C++ edlib core: suffix → barcode; R wrapper for I/O)
 ################################################################################
 
+#' Expand "~" and normalize for C++ file I/O (gzopen/ofstream do not expand "~").
+#' @keywords internal
+.abs_path <- function(path, mustWork = FALSE) {
+    if (is.null(path)) {
+        return(NULL)
+    }
+    path <- path.expand(as.character(path))
+    if (!length(path)) {
+        return(path)
+    }
+    normalizePath(path, winslash = "/", mustWork = mustWork)
+}
+
 #' Demultiplex reads by dual barcodes
 #'
 #' Classifies multiplexed FASTQ reads into samples using a two-step procedure
 #' implemented in C++ (edlib HW for adapter **suffix** anchors; barcode matching
-#' via a precomputed mutant dictionary). Primary outputs are assignment tables;
-#' sample FASTQ files are written only when `split_reads = TRUE`
-#' (via [splitDemultiplexReads()]).
+#' via a precomputed mutant dictionary). FASTQ is streamed in chunks (no full
+#' Biostrings load). Assignment tables are written incrementally; when
+#' `split_reads = TRUE`, per-sample FASTQ files are written in the same pass.
 #'
 #' @param fastq Character vector of FASTQ paths (`.fq` / `.fastq`, optionally `.gz`).
 #' @param demult_dir Output directory for demultiplex results.
@@ -28,19 +41,24 @@
 #'   ID appears in exactly one index pair (non-combinatorial layout). On
 #'   combinatorial plates (shared F/R IDs across wells), the run stops at
 #'   startup. Conflicting hits on both ends are rejected as `ambiguous_ends`.
-#' @param split_reads If `TRUE`, call [splitDemultiplexReads()] after assignment.
-#' @param compress Passed to [splitDemultiplexReads()] when `split_reads = TRUE`.
+#' @param split_reads If `TRUE`, write per-sample FASTQ under
+#'   `demult_dir/by_sample/` in the same streaming pass.
+#' @param compress If `TRUE` and `split_reads = TRUE`, write `.fq.gz`.
 #' @param chunk_size Reads per C++ batch (streaming to limit peak memory).
 #' @param stats_unassign If `TRUE`, write `stats_unassigned.tsv` summarizing
 #'   unassigned read counts by `reason`.
+#' @param return_tables If `TRUE` (default), read `assignments.tsv` /
+#'   `unassigned.tsv` back into data.frames for the return value. Set
+#'   `FALSE` to keep peak RAM low (tables remain on disk).
 #'
 #' @return A list with `assignments`, `summary`, `unassigned`, `demult_dir`,
 #'   and `n_edlib` (total edlib calls in the C++ core). When
-#'   `stats_unassign = TRUE`, also includes `stats_unassigned`.
+#'   `stats_unassign = TRUE`, also includes `stats_unassigned`. When
+#'   `return_tables = FALSE`, `assignments` / `unassigned` are empty
+#'   placeholders and paths are in `assignments_tsv` / `unassigned_tsv`.
 #'
 #' @export
 #' @useDynLib miaoseq, .registration = TRUE
-#' @importFrom Biostrings readDNAStringSet
 #' @importFrom Rcpp sourceCpp
 #' @importFrom stats setNames
 #' @importFrom utils read.csv write.table
@@ -57,12 +75,20 @@ doDemultiplex <- function(fastq,
                           split_reads = FALSE,
                           compress = TRUE,
                           chunk_size = 20000,
-                          stats_unassign = FALSE) {
+                          stats_unassign = FALSE,
+                          return_tables = TRUE) {
+    # C++ ofstream/gzopen do not expand "~"; normalize before streaming I/O.
+    demult_dir <- .abs_path(demult_dir[[1L]], mustWork = FALSE)
+    index_list <- .abs_path(index_list[[1L]], mustWork = TRUE)
+    if (!is.null(sample_list)) {
+        sample_list <- .abs_path(sample_list[[1L]], mustWork = TRUE)
+    }
     if (!dir.exists(demult_dir)) {
         dir.create(demult_dir, recursive = TRUE, showWarnings = FALSE)
     }
-    fastq <- as.character(fastq)
-    if (length(fastq) < 1 || any(!file.exists(fastq))) {
+    demult_dir <- .abs_path(demult_dir, mustWork = TRUE)
+    fastq <- .abs_path(fastq, mustWork = TRUE)
+    if (length(fastq) < 1) {
         stop("All fastq paths must exist.")
     }
 
@@ -108,66 +134,117 @@ doDemultiplex <- function(fastq,
     write.table(design, file.path(demult_dir, "design_check.tsv"),
                 sep = "\t", quote = FALSE, row.names = FALSE)
 
-    assign_parts <- list()
-    un_parts <- list()
-    n_edlib_total <- 0
-
-    for (fq in fastq) {
-        message("Demultiplexing: ", fq)
-        part <- .demultiplex_fastq_cpp(
-            fq = fq,
-            layout = layout,
-            sample_map = sample_map,
-            n_core = n_core,
-            end_window = end_window,
-            max_anchor_edit = max_anchor_edit,
-            max_barcode_edit = max_barcode_edit,
-            allow_revcomp = allow_revcomp,
-            allow_single_end = allow_single_end,
-            chunk_size = chunk_size
-        )
-        assign_parts[[fq]] <- part$assignments
-        un_parts[[fq]] <- part$unassigned
-        n_edlib_total <- n_edlib_total + part$n_edlib
+    if (isTRUE(split_reads)) {
+        dir.create(file.path(demult_dir, "by_sample"),
+                   recursive = TRUE, showWarnings = FALSE)
     }
 
-    assignments <- .rbind_or_empty(assign_parts, .empty_assignments())
-    unassigned <- .rbind_or_empty(un_parts, .empty_unassigned())
-    summary_df <- .summarize_assignments(assignments)
+    message("Demultiplexing ", length(fastq), " FASTQ file(s) (streaming)...")
+    res <- demux_fastq_stream_cpp(
+        fastq_files = fastq,
+        demult_dir = demult_dir,
+        f_suffix = layout$f_suffix,
+        r_suffix = layout$r_suffix,
+        f_barcodes = unname(layout$f_barcodes),
+        f_barcode_names = names(layout$f_barcodes),
+        r_barcodes = unname(layout$r_barcodes),
+        r_barcode_names = names(layout$r_barcodes),
+        pair_f_names = sample_map$f_index_id,
+        pair_r_names = sample_map$r_index_id,
+        pair_ids = sample_map$index_pair_id,
+        sample_ids = sample_map$sample_id,
+        end_window = as.integer(end_window),
+        max_anchor_edit = as.integer(max_anchor_edit),
+        max_barcode_edit = as.integer(max_barcode_edit),
+        allow_revcomp = isTRUE(allow_revcomp),
+        allow_single_end = isTRUE(allow_single_end),
+        n_core = as.integer(n_core),
+        chunk_size = as.integer(chunk_size),
+        split_reads = isTRUE(split_reads),
+        compress = isTRUE(compress),
+        include_unassigned_fastq = FALSE
+    )
+
+    summary_df <- data.frame(
+        sample_id = as.character(res$summary_sample_id),
+        index_pair_id = as.character(res$summary_index_pair_id),
+        n_reads = as.integer(res$summary_n_reads),
+        n_complete = as.integer(res$summary_n_complete),
+        n_fuzzy = as.integer(res$summary_n_fuzzy),
+        n_single_end = as.integer(res$summary_n_single_end),
+        stringsAsFactors = FALSE
+    )
+    summary_df <- summary_df[summary_df$n_reads > 0L, , drop = FALSE]
+    rownames(summary_df) <- NULL
+    write.table(summary_df, file.path(demult_dir, "summary_by_sample.tsv"),
+                sep = "\t", quote = FALSE, row.names = FALSE)
+
     stats_unassigned_df <- NULL
     if (isTRUE(stats_unassign)) {
-        stats_unassigned_df <- .stats_unassign_demultiplex(unassigned)
+        rn <- as.character(res$reason_names)
+        rc <- as.integer(res$reason_n)
+        if (length(rn)) {
+            n_total <- sum(rc)
+            stats_unassigned_df <- data.frame(
+                scope = "overall",
+                sample_id = "",
+                reason = rn,
+                n = rc,
+                fraction = as.numeric(rc) / n_total,
+                stringsAsFactors = FALSE
+            )
+            stats_unassigned_df <-
+                stats_unassigned_df[order(-stats_unassigned_df$n), , drop = FALSE]
+            rownames(stats_unassigned_df) <- NULL
+        } else {
+            stats_unassigned_df <- .stats_unassign_reason_table(
+                character(), scope = "overall"
+            )
+        }
         write.table(
             stats_unassigned_df,
             file.path(demult_dir, "stats_unassigned.tsv"),
             sep = "\t", quote = FALSE, row.names = FALSE
         )
     }
-    .write_demultiplex_tables(demult_dir, assignments, summary_df, unassigned)
 
-    if (isTRUE(split_reads) && nrow(assignments) > 0) {
-        splitDemultiplexReads(
-            fastq = fastq,
-            assignments = assignments,
-            out_dir = file.path(demult_dir, "by_sample"),
-            compress = compress
+    assignments <- .empty_assignments()
+    unassigned <- .empty_unassigned()
+    if (isTRUE(return_tables)) {
+        assignments <- utils::read.delim(
+            res$assignments_tsv, stringsAsFactors = FALSE
+        )
+        unassigned <- utils::read.delim(
+            res$unassigned_tsv, stringsAsFactors = FALSE
         )
     }
+
+    message(
+        "Demultiplex done: ",
+        format(as.integer(res$n_assigned), big.mark = ","), " assigned / ",
+        format(as.integer(res$n_records), big.mark = ","), " reads"
+    )
 
     list(
         assignments = assignments,
         summary = summary_df,
         unassigned = unassigned,
         demult_dir = demult_dir,
-        n_edlib = n_edlib_total,
-        stats_unassigned = stats_unassigned_df
+        n_edlib = res$n_edlib,
+        stats_unassigned = stats_unassigned_df,
+        assignments_tsv = res$assignments_tsv,
+        unassigned_tsv = res$unassigned_tsv,
+        n_records = res$n_records,
+        n_assigned = res$n_assigned,
+        n_unassigned = res$n_unassigned
     )
 }
 
 #' Split a FASTQ by demultiplex assignments
 #'
 #' Writes one FASTQ per `sample_id` using `assignments` from [doDemultiplex()].
-#' Can be run after `doDemultiplex(..., split_reads = FALSE)`.
+#' Can be run after `doDemultiplex(..., split_reads = FALSE)`. Uses a C++
+#' streaming reader/writer (not line-by-line R I/O).
 #'
 #' @param fastq Character vector of source FASTQ paths.
 #' @param assignments `assignments.tsv` path or a data.frame with
@@ -175,13 +252,15 @@ doDemultiplex <- function(fastq,
 #' @param out_dir Output directory for per-sample FASTQ files.
 #' @param compress If `TRUE`, write `.fq.gz`.
 #' @param include_unassigned If `TRUE`, also write `unassigned.fq(.gz)`.
-#' @param unassigned Optional unassigned table / TSV path.
+#' @param unassigned Optional unassigned table / TSV path (required when
+#'   `include_unassigned = TRUE` unless `assignments` is a TSV path next to
+#'   `unassigned.tsv`).
 #' @param n_core Unused (reserved).
 #'
 #' @return Invisibly, a named integer vector of reads written per sample.
 #'
 #' @export
-#' @importFrom utils read.delim
+#' @importFrom utils read.delim write.table
 splitDemultiplexReads <- function(fastq,
                                   assignments,
                                   out_dir,
@@ -381,7 +460,7 @@ splitDemultiplexReads <- function(fastq,
 }
 
 ################################################################################
-# C++ driver
+# C++ driver (legacy in-memory path kept for demux_reads_cpp unit use)
 ################################################################################
 
 #' @keywords internal
@@ -389,6 +468,8 @@ splitDemultiplexReads <- function(fastq,
                                    end_window, max_anchor_edit,
                                    max_barcode_edit,
                                    allow_revcomp, allow_single_end, chunk_size) {
+    # Prefer streaming API via doDemultiplex(); this helper remains for
+    # callers that already hold sequences in memory.
     reads <- .read_fastq_seqs(fq)
     n <- length(reads)
     if (n < 1) {
@@ -630,42 +711,82 @@ splitDemultiplexReads <- function(fastq,
                                        compress = TRUE,
                                        include_unassigned = FALSE,
                                        unassigned = NULL) {
-    assignments <- .as_assignment_df(assignments)
-    if (!all(c("read_id", "sample_id") %in% names(assignments))) {
-        stop("assignments must contain read_id and sample_id columns.")
-    }
+    out_dir <- .abs_path(out_dir[[1L]], mustWork = FALSE)
     if (!dir.exists(out_dir)) {
         dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
     }
+    out_dir <- .abs_path(out_dir, mustWork = TRUE)
+    fastq <- .abs_path(fastq, mustWork = TRUE)
 
-    id2sample <- setNames(assignments$sample_id, assignments$read_id)
-    un_ids <- character()
-    if (isTRUE(include_unassigned) && !is.null(unassigned)) {
-        unassigned <- .as_assignment_df(unassigned)
-        un_ids <- unique(unassigned$read_id)
-    }
-
-    samples <- sort(unique(assignments$sample_id))
-    ext <- if (compress) ".fq.gz" else ".fq"
-    cons <- list()
-    counts <- setNames(integer(length(samples)), samples)
-    for (s in samples) {
-        path <- file.path(out_dir, paste0(.safe_filename(s), ext))
-        cons[[s]] <- if (compress) gzfile(path, open = "wt") else file(path, open = "wt")
-    }
-    un_con <- NULL
-    if (length(un_ids)) {
-        path <- file.path(out_dir, paste0("unassigned", ext))
-        un_con <- if (compress) gzfile(path, open = "wt") else file(path, open = "wt")
-    }
+    assign_tsv <- NULL
+    un_tsv <- ""
+    tmp_assign <- NULL
+    tmp_un <- NULL
     on.exit({
-        for (con in cons) close(con)
-        if (!is.null(un_con)) close(un_con)
+        if (!is.null(tmp_assign) && file.exists(tmp_assign)) unlink(tmp_assign)
+        if (!is.null(tmp_un) && file.exists(tmp_un)) unlink(tmp_un)
     }, add = TRUE)
 
-    for (fq in fastq) {
-        counts <- .stream_fastq_write(fq, id2sample, cons, counts, un_ids, un_con)
+    if (is.character(assignments) && length(assignments) == 1L &&
+        file.exists(.abs_path(assignments, mustWork = FALSE))) {
+        assign_tsv <- .abs_path(assignments, mustWork = TRUE)
+        if (isTRUE(include_unassigned)) {
+            if (is.character(unassigned) && length(unassigned) == 1L &&
+                file.exists(.abs_path(unassigned, mustWork = FALSE))) {
+                un_tsv <- .abs_path(unassigned, mustWork = TRUE)
+            } else {
+                cand <- file.path(dirname(assign_tsv), "unassigned.tsv")
+                if (file.exists(cand)) {
+                    un_tsv <- .abs_path(cand, mustWork = TRUE)
+                }
+            }
+        }
+    } else {
+        assignments <- .as_assignment_df(assignments)
+        if (!all(c("read_id", "sample_id") %in% names(assignments))) {
+            stop("assignments must contain read_id and sample_id columns.")
+        }
+        tmp_assign <- tempfile(fileext = ".tsv")
+        utils::write.table(
+            data.frame(
+                read_id = assignments$read_id,
+                index_pair_id = if ("index_pair_id" %in% names(assignments))
+                    assignments$index_pair_id else assignments$sample_id,
+                f_index_id = if ("f_index_id" %in% names(assignments))
+                    assignments$f_index_id else "",
+                r_index_id = if ("r_index_id" %in% names(assignments))
+                    assignments$r_index_id else "",
+                sample_id = assignments$sample_id,
+                stringsAsFactors = FALSE
+            ),
+            tmp_assign, sep = "\t", quote = FALSE, row.names = FALSE
+        )
+        assign_tsv <- tmp_assign
+        if (isTRUE(include_unassigned) && !is.null(unassigned)) {
+            unassigned <- .as_assignment_df(unassigned)
+            tmp_un <- tempfile(fileext = ".tsv")
+            utils::write.table(
+                data.frame(
+                    read_id = unassigned$read_id,
+                    reason = if ("reason" %in% names(unassigned))
+                        unassigned$reason else "",
+                    stringsAsFactors = FALSE
+                ),
+                tmp_un, sep = "\t", quote = FALSE, row.names = FALSE
+            )
+            un_tsv <- tmp_un
+        }
     }
+
+    res <- split_fastq_by_assignment_cpp(
+        fastq_files = fastq,
+        assignments_tsv = assign_tsv,
+        out_dir = out_dir,
+        compress = isTRUE(compress),
+        include_unassigned = isTRUE(include_unassigned),
+        unassigned_tsv = un_tsv
+    )
+    counts <- setNames(as.integer(res$n_reads), as.character(res$sample_id))
     invisible(counts)
 }
 
@@ -685,28 +806,6 @@ splitDemultiplexReads <- function(fastq,
 
 #' @keywords internal
 .stream_fastq_write <- function(fastq, id2sample, cons, counts, un_ids, un_con) {
-    con <- if (grepl("\\.gz$", fastq, ignore.case = TRUE)) {
-        gzfile(fastq, open = "rt")
-    } else {
-        file(fastq, open = "rt")
-    }
-    on.exit(close(con), add = TRUE)
-
-    repeat {
-        h <- readLines(con, n = 1L)
-        if (length(h) == 0L) break
-        s <- readLines(con, n = 1L)
-        p <- readLines(con, n = 1L)
-        q <- readLines(con, n = 1L)
-        if (length(s) == 0L || length(p) == 0L || length(q) == 0L) break
-        rid <- sub("^@", "", strsplit(h, "\\s+")[[1]][1])
-        sample <- unname(id2sample[rid])
-        if (length(sample) == 1L && !is.na(sample) && !is.null(cons[[sample]])) {
-            writeLines(c(h, s, p, q), cons[[sample]])
-            counts[[sample]] <- counts[[sample]] + 1L
-        } else if (!is.null(un_con) && rid %in% un_ids) {
-            writeLines(c(h, s, p, q), un_con)
-        }
-    }
+    .Deprecated(msg = "Internal R FASTQ splitter replaced by C++ streaming.")
     counts
 }

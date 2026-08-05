@@ -8,7 +8,7 @@ doReassessAssemblies(
   amplicon_out,
   gene_assign = NULL,
   out_dir,
-  backend = c("edlib", "vsearch", "blastn", "mmseqs"),
+  backend = "edlib",
   consensus_merge_max_edit = 12L,
   read_assign_max_edit = 12L,
   min_identity = NULL,
@@ -31,8 +31,10 @@ missing.}
 \item{out_dir}{Output directory (e.g. \code{.../amplicon_reassess}).}
 
 \item{backend}{Character vector of backends to run. Allowed:
-\code{"edlib"}, \code{"vsearch"}, \code{"blastn"}, \code{"mmseqs"}. Multiple values produce
-parallel result trees and a \code{summary_compare.tsv}.}
+\code{"edlib"}, \code{"vsearch"}, \code{"blastn"}, \code{"mmseqs"}. Default \code{"edlib"} provides
+an independent exact edit-distance evaluation of clustering results (a
+different perspective from vsearch \%identity used in clustering). Multiple
+values produce parallel result trees and a \code{summary_compare.tsv}.}
 
 \item{consensus_merge_max_edit}{Max edit distance (bp) used only as a
 \strong{highlight threshold} for Q1 pairwise / near-duplicate grouping
@@ -44,7 +46,7 @@ reassignment diagnostics (Q2). Same identity derivation as above.}
 
 \item{min_identity}{Optional identity threshold in \eqn{[0,1]} for
 \code{vsearch} / \code{blastn} / \code{mmseqs}. If \code{NULL}, derived from edit distance and
-median consensus length.}
+median consensus length via \code{\link[=.vsearch_id_from_edit]{.vsearch_id_from_edit()}}.}
 
 \item{layers}{Unassigned layers to include. Currently \code{"U1"} only.}
 
@@ -70,7 +72,8 @@ consensus similarity (and optional near-duplicate groups for review) and
 (Q2) whether U1 unassigned reads can be reassigned to an existing
 consensus. Does \strong{not} auto-merge or rewrite sequences: the user chooses
 which consensus to keep from the pairwise report.
-
+}
+\details{
 Does \strong{not} modify \verb{amplicon/}. Results are written under \code{out_dir}
 (typically \verb{amplicon_reassess/}), with one subdirectory per \code{backend}
 so edlib / VSEARCH / BLASTN / MMseqs2 can be compared.

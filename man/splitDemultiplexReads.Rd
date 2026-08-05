@@ -26,7 +26,9 @@ splitDemultiplexReads(
 
 \item{include_unassigned}{If \code{TRUE}, also write \code{unassigned.fq(.gz)}.}
 
-\item{unassigned}{Optional unassigned table / TSV path.}
+\item{unassigned}{Optional unassigned table / TSV path (required when
+\code{include_unassigned = TRUE} unless \code{assignments} is a TSV path next to
+\code{unassigned.tsv}).}
 
 \item{n_core}{Unused (reserved).}
 }
@@ -35,5 +37,6 @@ Invisibly, a named integer vector of reads written per sample.
 }
 \description{
 Writes one FASTQ per \code{sample_id} using \code{assignments} from \code{\link[=doDemultiplex]{doDemultiplex()}}.
-Can be run after \code{doDemultiplex(..., split_reads = FALSE)}.
+Can be run after \code{doDemultiplex(..., split_reads = FALSE)}. Uses a C++
+streaming reader/writer (not line-by-line R I/O).
 }
